@@ -248,3 +248,33 @@ class TestFiltersHoldAcrossTheJoin:
         chunks = settings.elasticsearch.chunks_index
         assert client.count(chunks, {"term": {"version": 1}}) == 0
         assert client.count(chunks, {"term": {"version": 2}}) > 0
+
+
+class TestDependents:
+    """The reverse edges: which formulas read a range, through the API, from ingested documents."""
+
+    def _dependents(self, test_client: TestClient, sheet: str, a1: str, **extra: object) -> set:
+        response = test_client.post(
+            "/api/v1/excel/dependents",
+            json={"workbook_id": WORKBOOK_ID, "sheet_name": sheet, "a1": a1, **extra},
+        )
+        assert response.status_code == 200, response.text
+        return {(node["sheet"], node["a1_range"]) for node in response.json()["nodes"]}
+
+    def test_a_cell_inside_a_read_range_finds_the_formula(self, deployment) -> None:
+        """`SUM(Actuals!D2:D500)` is one edge, yet `D100` still finds the formula reading it."""
+        test_client, _, _ = deployment
+        assert ("Forecast", "B2") in self._dependents(test_client, "Actuals", "D100")
+
+    def test_the_exact_precedent_cell_finds_the_formula(self, deployment) -> None:
+        test_client, _, _ = deployment
+        assert ("Forecast", "B2") in self._dependents(test_client, "Assumptions", "C7")
+
+    def test_an_unread_cell_has_no_dependents(self, deployment) -> None:
+        test_client, _, _ = deployment
+        assert self._dependents(test_client, "Assumptions", "C8") == set()
+        assert self._dependents(test_client, "Actuals", "E100") == set()
+
+    def test_a_caller_without_the_scope_sees_no_dependents(self, deployment) -> None:
+        test_client, _, _ = deployment
+        assert self._dependents(test_client, "Actuals", "D100", acl_scopes=["hr-team"]) == set()

@@ -202,6 +202,23 @@ class Reference(BaseModel):
     a1_range: str
     kind: ReferenceKind
     resolved: bool = True
+    #: The target rectangle as ``integer_range`` spans, indexed on the nested edge so "which
+    #: formulas read this range?" is a span intersection (see ``Repository.query_dependents``).
+    #: Derived from ``a1_range`` when it is a plain A1 rectangle; set explicitly otherwise.
+    row_span: dict[str, int] | None = None
+    column_span: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def _derive_spans(self) -> Reference:
+        if self.row_span is None or self.column_span is None:
+            try:
+                bounds = A1Range.parse(self.sheet_name, self.a1_range)
+            except ValueError:
+                return self
+            # Frozen: set through object.__setattr__ during validation only.
+            object.__setattr__(self, "row_span", self.row_span or bounds.row_span)
+            object.__setattr__(self, "column_span", self.column_span or bounds.column_span)
+        return self
 
 
 class UnresolvedReference(BaseModel):

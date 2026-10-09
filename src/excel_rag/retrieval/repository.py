@@ -301,6 +301,61 @@ class Repository:
             clauses.append({"terms": {"node_type": list(node_types)}})
         return self._structure_search({"bool": {"filter": clauses}}, limit=limit)
 
+    def query_dependents(
+        self,
+        *,
+        scope: Scope,
+        workbook_id: str,
+        sheet_name: str,
+        region: A1Range,
+        node_types: Sequence[str] = (),
+        limit: int = 50,
+    ) -> list[StructureDocument]:
+        """Nodes with a reference edge whose target overlaps ``region``: what reads this range.
+
+        The reverse of expansion, answered the same way as :meth:`query_range` -- by
+        ``integer_range`` intersection, here on the spans each nested edge carries -- so a formula
+        reading ``Actuals!D2:D500`` is a dependent of ``Actuals!D100`` without one edge per cell.
+        The dependent itself may sit on any sheet of the workbook.
+        """
+        clauses = scope.filters()
+        clauses.extend(
+            [
+                {"term": {"workbook_id": workbook_id}},
+                {
+                    "nested": {
+                        "path": "references",
+                        "query": {
+                            "bool": {
+                                "filter": [
+                                    {"term": {"references.sheet_name": sheet_name}},
+                                    {
+                                        "range": {
+                                            "references.row_span": {
+                                                "gte": region.min_row,
+                                                "lte": region.max_row,
+                                            }
+                                        }
+                                    },
+                                    {
+                                        "range": {
+                                            "references.column_span": {
+                                                "gte": region.min_col,
+                                                "lte": region.max_col,
+                                            }
+                                        }
+                                    },
+                                ]
+                            }
+                        },
+                    }
+                },
+            ]
+        )
+        if node_types:
+            clauses.append({"terms": {"node_type": list(node_types)}})
+        return self._structure_search({"bool": {"filter": clauses}}, limit=limit)
+
     def _structure_search(self, es_query: dict[str, Any], *, limit: int) -> list[StructureDocument]:
         result = self._client.search(self.structure_index, es_query, size=limit)
         return [StructureDocument.model_validate(_source(hit)) for hit in _hits(result)]

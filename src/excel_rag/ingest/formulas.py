@@ -266,7 +266,12 @@ class _Collector:
         self.edges.append(
             ReferenceEdge(
                 reference=Reference(
-                    target_node_id=target, sheet_name=sheet_name, a1_range=a1, kind=kind
+                    target_node_id=target,
+                    sheet_name=sheet_name,
+                    a1_range=a1,
+                    kind=kind,
+                    row_span={"gte": min_row, "lte": max_row},
+                    column_span={"gte": min_col, "lte": max_col},
                 ),
                 absolute=absolute,
                 min_row=min_row,

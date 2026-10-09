@@ -127,6 +127,12 @@ class TestMappingsMatchTheModels:
         assert references["type"] == "nested", "a flat array cannot be queried edge by edge"
         assert set(references["properties"]) >= {"target_node_id", "sheet_name", "a1_range", "kind"}
 
+    def test_reference_edges_carry_indexed_spans(self) -> None:
+        """The dependents query intersects these; without them it would be a scan."""
+        edge = INDEX_MAPPINGS[INDEX_STRUCTURE]["properties"]["references"]["properties"]
+        assert edge["row_span"]["type"] == "integer_range"
+        assert edge["column_span"]["type"] == "integer_range"
+
     def test_active_version_manifest_is_mapped(self) -> None:
         from excel_rag.es import INDEX_VERSIONS
 

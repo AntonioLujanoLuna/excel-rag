@@ -1,4 +1,4 @@
-"""Assemble a :class:`~excel_rag.ingest.canonical.WorkbookModel` from raw sheets.
+"""Assemble a :class:`~excel_rag.workbook.canonical.WorkbookModel` from raw sheets.
 
 This is the seam between the reader (bytes -> raw cells), region detection (cells -> regions),
 formula extraction (formula text -> edges) and the document builder. Formula cells are grouped by

@@ -28,7 +28,7 @@ import openpyxl  # type: ignore[import-untyped]
 from openpyxl.utils.exceptions import InvalidFileException  # type: ignore[import-untyped]
 
 from .canonical import CellValue
-from .errors import IngestError
+from .errors import WorkbookError
 
 _XLNS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _RELNS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -145,19 +145,19 @@ def _read_package(data: bytes) -> _PackageFacts:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
-        raise IngestError(
+        raise WorkbookError(
             "not a valid .xlsx/.xlsm package (not a zip archive; the file may be corrupt, "
             "truncated, or password-protected)"
         ) from exc
     names = archive.namelist()
     uncompressed = sum(item.file_size for item in archive.infolist())
     if uncompressed > MAX_UNCOMPRESSED_BYTES:
-        raise IngestError(
+        raise WorkbookError(
             f"refusing workbook: declared uncompressed size {uncompressed} bytes exceeds "
             f"the {MAX_UNCOMPRESSED_BYTES}-byte ceiling"
         )
     if "xl/workbook.xml" not in names:
-        raise IngestError("not an Excel workbook package: xl/workbook.xml is missing")
+        raise WorkbookError("not an Excel workbook package: xl/workbook.xml is missing")
 
     relationships: dict[str, tuple[str, str]] = {}
     if "xl/_rels/workbook.xml.rels" in names:
@@ -219,25 +219,34 @@ def _load(data: bytes, *, data_only: bool) -> Any:
             io.BytesIO(data), data_only=data_only, keep_vba=False, read_only=False
         )
     except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as exc:
-        raise IngestError(f"could not read the workbook: {exc}") from exc
+        raise WorkbookError(f"could not read the workbook: {exc}") from exc
 
 
-def read_workbook(path: str | Path) -> RawWorkbook:
-    """Read ``path`` into :class:`RawWorkbook`, or raise :class:`IngestError`.
+def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWorkbook:
+    """Read a workbook into :class:`RawWorkbook`, or raise :class:`WorkbookError`.
 
+    ``path`` is a file path, or the workbook's bytes (a chat upload never touches disk); ``name``
+    then labels it in messages and in ``source_file``. The same package guards apply either way.
     Never loads or executes macros, never refreshes external links, never evaluates a formula.
     """
-    source = Path(path)
-    if not source.is_file():
-        raise IngestError(f"no such workbook: {source}")
-    data = source.read_bytes()
+    if isinstance(path, bytes):
+        data = path
+        label = name or "workbook.xlsx"
+        location = label
+    else:
+        source = Path(path)
+        if not source.is_file():
+            raise WorkbookError(f"no such workbook: {source}")
+        data = source.read_bytes()
+        label = name or source.name
+        location = str(source)
     digest = hashlib.sha256(data).hexdigest()
     facts = _read_package(data)
 
     formula_wb = _load(data, data_only=False)
     try:
         cached_wb = _load(data, data_only=True)
-    except IngestError:
+    except WorkbookError:
         cached_wb = None
 
     macro_names = facts.macro_names
@@ -328,8 +337,8 @@ def read_workbook(path: str | Path) -> RawWorkbook:
     )
 
     return RawWorkbook(
-        path=str(source),
-        source_file=source.name,
+        path=location,
+        source_file=label,
         source_sha256=digest,
         sheets=tuple(sheets),
         defined_names=defined_names,

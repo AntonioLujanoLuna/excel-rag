@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from excel_rag.ingest.canonical import RegionKind
-from excel_rag.ingest.reader import read_workbook
-from excel_rag.ingest.regions import RegionConfig, detect_regions
+from excel_rag.workbook.canonical import RegionKind
+from excel_rag.workbook.reader import read_workbook
+from excel_rag.workbook.regions import RegionConfig, detect_regions
 
 
 def _regions(build, name: str, **kwargs):

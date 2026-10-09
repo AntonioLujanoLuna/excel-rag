@@ -28,7 +28,7 @@ from ..models import (
     ReferenceKind,
     StructureDocument,
 )
-from .canonical import (
+from ..workbook.canonical import (
     ColumnSchema,
     FormulaEntry,
     Region,
@@ -41,7 +41,7 @@ from .canonical import (
     format_value,
     workbook_node_id,
 )
-from .reader import column_index
+from ..workbook.reader import column_index
 
 #: Ideal rows per row-group chunk. A larger region gets coarser groups so the group count is capped.
 ROW_GROUP_ROWS = 50

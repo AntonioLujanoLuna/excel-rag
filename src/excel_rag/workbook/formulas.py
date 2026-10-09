@@ -15,7 +15,7 @@ or a string that spells one (``"B7"``) is never mistaken for a reference. Each `
 token is then resolved on its own: a cell or rectangle, a whole column or row, a 3-D reference
 across a run of sheets, a structured table reference, or a defined name.
 
-The declared node ids come from :mod:`excel_rag.ingest.canonical`, so an edge target and the
+The declared node ids come from :mod:`excel_rag.workbook.canonical`, so an edge target and the
 structure node it points at are produced by the same convention.
 """
 

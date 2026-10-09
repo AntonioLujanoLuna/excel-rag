@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from excel_rag.ingest import IngestError, read_workbook
-from excel_rag.ingest.reader import merged_top_left
+from excel_rag.workbook.reader import merged_top_left
 
 
 def test_reads_cells_merged_tables_and_formulas(build) -> None:

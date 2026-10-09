@@ -15,6 +15,9 @@ dependencies = [
 
 [project.optional-dependencies]
 es = ["elasticsearch>=8.14,<9"]
+# In-process embeddings (lightonai/mDenseOn by default). Pulls in torch; for CPU-only hosts install
+# torch from https://download.pytorch.org/whl/cpu first to avoid the CUDA wheels.
+embed = ["sentence-transformers>=5.4"]
 dev = [
     "pytest>=8.3",
     "pytest-cov>=6",

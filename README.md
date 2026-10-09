@@ -29,11 +29,11 @@ Excel (.xlsx / .xlsm)
         |
   canonical representation (in memory: hierarchy, ranges, tables, values, dependencies)
         |
-  embedding pipeline + bulk index
+  embedding (lightonai/mDenseOn) + bulk index
         |
         +--------------------------------+
         | Elasticsearch                  |
-        |   excel_chunks    <- BM25 / dense vectors / ColBERT
+        |   excel_chunks    <- BM25 + dense vectors (knn), fused by RRF
         |   excel_structure <- nodes, values, typed edges
         |   excel_versions  <- active version per workbook
         +--------------------------------+
@@ -80,6 +80,13 @@ curl -s localhost:8080/api/v1/search/excel -H 'content-type: application/json' -
 }' | jq
 ```
 
+Search is **hybrid**: the query is embedded with
+[`lightonai/mDenseOn`](https://huggingface.co/lightonai/mDenseOn) — a 307M-parameter multilingual
+dense retriever (768 dimensions, `query:`/`document:` prompts) — and a `knn` search over the chunk
+embeddings runs next to BM25, under the same ACL and version filters; the two ranked lists are
+merged by reciprocal-rank fusion. A question in Spanish, French or German finds the English
+workbook's table that answers it, which no keyword query does.
+
 The response carries `hits` (scored chunks with `source.workbook_id`/`version`/`sheet`/`a1_range`),
 `nodes` (the exact structural payloads, keyed by node id), `unresolved_references` and
 `truncation` — what a bounded expansion dropped and why. It is **retrieval evidence, not a
@@ -112,7 +119,7 @@ a dependent of `Actuals!D100` without one edge per cell.
 
 ```bash
 uv sync --extra dev
-uv run pytest                                  # runs against the in-memory Elasticsearch double
+uv run pytest                                  # in-memory Elasticsearch double, no model weights
 uv run excel-rag inspect path/to/book.xlsx     # print the regions, tables and counts ingestion detects
 ```
 
@@ -123,11 +130,23 @@ No `.xlsx` is committed: the test workbooks are generated at test time by
 them, so indexing and then serving needs a live cluster:
 
 ```bash
-uv sync --extra dev --extra es
+uv sync --extra dev --extra es --extra embed   # embed: sentence-transformers + torch for mDenseOn
 export EXCEL_RAG_USE_LIVE_ELASTICSEARCH=true
 export EXCEL_RAG_ELASTICSEARCH__URLS='["http://127.0.0.1:9200"]'
 uv run excel-rag index path/to/book.xlsx --workbook-id wb42 --version 1
 uv run excel-rag serve
+```
+
+The model downloads (~1.2 GB) on first use and loads before the server accepts requests. Embedding
+settings: `EXCEL_RAG_EMBEDDING__MODEL` (default `lightonai/mDenseOn`), `__DIMS` (768),
+`__DEVICE` (`cpu`/`cuda`/`mps`), `__BATCH_SIZE`, `__MAX_SEQ_LENGTH` (1024 tokens per chunk), and
+`__PROVIDER=none` to index and search without vectors. On a CPU-only host, install torch from
+`https://download.pytorch.org/whl/cpu` first to skip the CUDA wheels.
+
+To run the live tests, including the real model end to end:
+
+```bash
+EXCEL_RAG_TEST_ES_URL=http://127.0.0.1:9200 EXCEL_RAG_TEST_MDENSEON=1 uv run pytest tests/live
 ```
 
 Callers and the scopes they hold (any configured token makes `/api/v1` require one):

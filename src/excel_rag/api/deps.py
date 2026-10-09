@@ -11,7 +11,8 @@ from __future__ import annotations
 import secrets
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
+from weakref import WeakSet
 
 from fastapi import Depends, HTTPException, Request
 
@@ -29,12 +30,22 @@ def get_client(request: Request) -> ElasticsearchLike:
 
 
 def get_repository(
+    request: Request,
     client: Annotated[ElasticsearchLike, Depends(get_client)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> Repository:
-    """A repository over the app's client. Ensuring the indices exist is idempotent."""
+    """A repository over the app's client, with its indices ensured once per client.
+
+    Ensuring is idempotent but not free -- three existence checks, which on a live cluster are three
+    round trips -- so it runs the first time a client is seen rather than on every request. A
+    client swapped in through ``dependency_overrides`` is a new client and is ensured in turn.
+    """
     repository = Repository(client, settings)
-    repository.ensure_indices()
+    ensured: WeakSet[Any] | None = getattr(request.app.state, "ensured_clients", None)
+    if ensured is None or client not in ensured:
+        repository.ensure_indices()
+        if ensured is not None:
+            ensured.add(client)
     return repository
 
 

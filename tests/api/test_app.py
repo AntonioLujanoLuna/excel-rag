@@ -108,3 +108,56 @@ class TestClientFactory:
         app = create_app()
         assert isinstance(app.state.client, InMemoryElasticsearch)
         assert app.state.settings.use_live_elasticsearch is False
+
+
+class TestIndexEnsuring:
+    def test_indices_are_checked_once_per_client_not_per_request(
+        self, api: Any, client: InMemoryElasticsearch
+    ) -> None:
+        body = {"query": "revenue", "include_structure": False}
+        api.post("/api/v1/search/excel", json=body)
+        checks = sum(1 for call in client.calls if call[0] == "indices_exists")
+        api.post("/api/v1/search/excel", json=body)
+        api.get("/health")
+        assert sum(1 for call in client.calls if call[0] == "indices_exists") - checks == len(
+            ("chunks", "structure", "versions")
+        ), "only /health's own counts() may check existence after the first request"
+
+
+class TestTooManyWorkbooks:
+    def test_an_unfiltered_search_past_the_manifest_page_is_a_400(
+        self, api: Any, monkeypatch: Any
+    ) -> None:
+        from excel_rag.retrieval import repository
+
+        monkeypatch.setattr(repository, "MANIFEST_PAGE_SIZE", 1)
+        response = api.post("/api/v1/search/excel", json={"query": "revenue"})
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "workbook_filter_required"
+
+
+class TestChunkedBodies:
+    def test_a_chunked_body_over_the_limit_is_413(self, api: Any) -> None:
+        """No Content-Length to check up front: the bytes are counted as they are read."""
+        payload = b'{"query": "' + b"x" * (MAX_REQUEST_BYTES + 1000) + b'"}'
+
+        def chunks() -> Any:
+            for start in range(0, len(payload), 65_536):
+                yield payload[start : start + 65_536]
+
+        response = api.post(
+            "/api/v1/search/excel",
+            content=chunks(),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 413
+        assert response.json()["error"]["type"] == "request_too_large"
+
+    def test_a_small_chunked_body_is_served(self, api: Any) -> None:
+        payload = b'{"query": "revenue", "include_structure": false}'
+        response = api.post(
+            "/api/v1/search/excel",
+            content=iter([payload[:10], payload[10:]]),
+            headers={"content-type": "application/json"},
+        )
+        assert response.status_code == 200

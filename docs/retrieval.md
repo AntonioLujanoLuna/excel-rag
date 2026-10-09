@@ -40,7 +40,10 @@ Response fields:
 | `truncation` | `{truncated, reason, dropped_nodes, depth_limit, bytes_returned}` — what the budgets dropped and why. |
 | `took_ms`, `es_requests` | wall-clock and the number of Elasticsearch calls the request cost. |
 
-Blank query → `400`. Unknown workbook in `filters.workbook_ids` → `404`. Oversized body → `413`.
+Blank query → `400`. Unknown workbook in `filters.workbook_ids` → `404`. Oversized body → `413`,
+whether it declares a `Content-Length` or arrives chunked (the bytes are counted as they are read).
+An ACL scope the caller does not hold → `403`. An unfiltered search when more workbooks are active
+than one manifest read returns (10,000) → `400` `workbook_filter_required`.
 Every non-2xx carries `{"error": {"type", "message", "details"}}`.
 
 ### `GET /api/v1/excel/{workbook_id}/structure`
@@ -91,7 +94,10 @@ holding the caller's ACL scopes and the active `(workbook_id, version)` pins.
   ACL or version) and `missing` (absent). A denied node is **never** put in `nodes`.
 
 A request never mixes versions: the version pin comes from the `excel_versions` manifest, and a
-workbook named in a filter that has no manifest is a `404`, not a silent empty result.
+workbook named in a filter that has no manifest is a `404`, not a silent empty result. The pin is
+one `terms` clause on `version_key` (`workbook_id:vN`, carried by every document), so its size does
+not grow a boolean clause per workbook. With no manifest at all nothing is active, and a search
+returns nothing rather than reading a version that was never activated.
 
 **One thing to be precise about:** a readable node's `references` edges are returned as part of that
 node, so an edge may *name* a target the caller cannot read. The target's payload and value are
@@ -136,7 +142,9 @@ are combined by **reciprocal-rank fusion** (RRF, k=60).
 
 - **Seeds** are the hit `node_id`s (depth 0). With `expand_references: true` the walk follows
   references up to `reference_depth` hops; the effective depth is capped at
-  `BudgetSettings.reference_depth`, and the node count at `BudgetSettings.max_related_nodes`.
+  `BudgetSettings.reference_depth`, and the count of *related* nodes (past the seeds) at
+  `BudgetSettings.max_related_nodes`. The seeds are bounded by `top_k`, so a large `top_k` never
+  has its own hits' nodes reported as dropped by the related-node budget.
 - **Cycle detection.** A formula graph has cycles (`A1 → B1 → A1`). A visited set makes every node
   appear at most once and the traversal terminate. The response schema has no cycle field, so this is
   a tested behaviour (`tests/retrieval/test_expansion.py::TestCycles`) rather than a payload field.

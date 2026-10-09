@@ -92,7 +92,7 @@ class TestMappingsMatchTheModels:
 
     def test_chunk_document_fields_are_mapped(self) -> None:
         mapped = set(INDEX_MAPPINGS[INDEX_CHUNKS]["properties"])
-        declared = set(ChunkDocument.model_fields)
+        declared = set(ChunkDocument.model_fields) | set(ChunkDocument.model_computed_fields)
         # `colbert` is a deliberate exception while the late-interaction stage is off; it is
         # carried so the pipeline can be switched on without a reindex.
         unmapped = declared - mapped - {"colbert"}
@@ -101,7 +101,10 @@ class TestMappingsMatchTheModels:
     def test_structure_document_fields_are_mapped(self) -> None:
         mapped = set(INDEX_MAPPINGS[INDEX_STRUCTURE]["properties"])
         parent_fields = {"children"}  # hierarchy edges live on the child as `parent_id`
-        unmapped = set(StructureDocument.model_fields) - mapped - parent_fields - {"node_id"}
+        declared = set(StructureDocument.model_fields) | set(
+            StructureDocument.model_computed_fields
+        )
+        unmapped = declared - mapped - parent_fields - {"node_id"}
         assert not unmapped, f"structure fields with no mapping: {sorted(unmapped)}"
 
     def test_embedding_fields_are_declared_together(self) -> None:

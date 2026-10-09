@@ -22,7 +22,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 # -------------------------------------------------------------------------------------------------
 # Identity
@@ -38,6 +38,15 @@ def node_id(workbook_id: str, version: int, kind: str, key: str) -> str:
     """
     slug = _ID_SAFE.sub("_", key.strip().lower())
     return f"{workbook_id}:v{version}:{kind}:{slug}"
+
+
+def version_key(workbook_id: str, version: int) -> str:
+    """The ``(workbook_id, version)`` pair as one keyword: ``wb42:v3``.
+
+    Every document carries it, so pinning a request to the active versions is a single ``terms``
+    clause however many workbooks there are, instead of one boolean clause per workbook.
+    """
+    return f"{workbook_id}:v{version}"
 
 
 class ChunkType(StrEnum):
@@ -242,6 +251,14 @@ class ChunkDocument(BaseModel):
     source_file: str | None = None
     source_sha256: str | None = None
     ingested_at: datetime | None = None
+    ingest_run: str | None = Field(
+        default=None, description="The indexing run that wrote this document; see the indexer."
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def version_key(self) -> str:
+        return version_key(self.workbook_id, self.version)
 
 
 class StructureDocument(BaseModel):
@@ -271,6 +288,14 @@ class StructureDocument(BaseModel):
     named_range: str | None = None
     acl_scope: tuple[str, ...] = ()
     source_file: str | None = None
+    ingest_run: str | None = Field(
+        default=None, description="The indexing run that wrote this document; see the indexer."
+    )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def version_key(self) -> str:
+        return version_key(self.workbook_id, self.version)
 
 
 class ActiveVersionManifest(BaseModel):

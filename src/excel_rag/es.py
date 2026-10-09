@@ -30,6 +30,12 @@ EMBEDDING_FIELD = "embedding"
 EMBEDDING_MODEL_FIELD = "embedding_model"
 COLBERT_FIELD = "colbert"
 
+#: ``workbook_id:vN`` on every document: the active-version pin is one ``terms`` clause on it.
+VERSION_KEY_FIELD = "version_key"
+#: The indexing run that wrote a document. A re-index of the same version removes the documents
+#: an earlier run wrote and this one did not, which deterministic ids alone cannot detect.
+INGEST_RUN_FIELD = "ingest_run"
+
 _RANGE_SPAN = {"type": "integer_range"}
 
 _MAPPING_TEMPLATE: dict[str, dict[str, Any]] = {
@@ -52,6 +58,8 @@ _MAPPING_TEMPLATE: dict[str, dict[str, Any]] = {
             "source_file": {"type": "keyword"},
             "source_sha256": {"type": "keyword"},
             "ingested_at": {"type": "date"},
+            VERSION_KEY_FIELD: {"type": "keyword"},
+            INGEST_RUN_FIELD: {"type": "keyword"},
         }
     },
     INDEX_STRUCTURE: {
@@ -93,6 +101,8 @@ _MAPPING_TEMPLATE: dict[str, dict[str, Any]] = {
             },
             ACL_FIELD: {"type": "keyword"},
             "source_file": {"type": "keyword"},
+            VERSION_KEY_FIELD: {"type": "keyword"},
+            INGEST_RUN_FIELD: {"type": "keyword"},
         }
     },
 }

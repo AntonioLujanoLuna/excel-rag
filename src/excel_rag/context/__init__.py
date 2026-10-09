@@ -16,15 +16,33 @@ from .render import (
     RenderedWorkbook,
     TokenCounter,
     approx_tokens,
+    formula_line,
     render_workbook,
+)
+from .tools import (
+    MAX_FORMULAS,
+    MAX_MATCHES,
+    MAX_RANGE_CELLS,
+    TOOL_DEFINITIONS,
+    ToolInputError,
+    ToolOutcome,
+    WorkbookSession,
 )
 
 __all__ = [
     "DETAIL_LADDER",
     "FORMULA_MARK",
+    "MAX_FORMULAS",
+    "MAX_MATCHES",
+    "MAX_RANGE_CELLS",
+    "TOOL_DEFINITIONS",
     "Detail",
     "RenderedWorkbook",
     "TokenCounter",
+    "ToolInputError",
+    "ToolOutcome",
+    "WorkbookSession",
     "approx_tokens",
+    "formula_line",
     "render_workbook",
 ]

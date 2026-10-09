@@ -19,6 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from excel_rag import create_app
+from excel_rag.embedding import HashingEmbedder
 from excel_rag.fake_es import in_memory_client
 from excel_rag.ingest import Indexer, ingest_workbook
 from excel_rag.settings import Settings
@@ -278,3 +279,39 @@ class TestDependents:
     def test_a_caller_without_the_scope_sees_no_dependents(self, deployment) -> None:
         test_client, _, _ = deployment
         assert self._dependents(test_client, "Actuals", "D100", acl_scopes=["hr-team"]) == set()
+
+
+class TestHybrid:
+    """Vectors written by ingestion are the ones the service's knn query reads."""
+
+    @pytest.fixture
+    def hybrid(self, tmp_path: Path) -> TestClient:
+        settings = Settings()
+        client = in_memory_client(settings)
+        embedder = HashingEmbedder(settings.embedding.dims)
+        ingested = ingest_workbook(
+            make_fixtures.cross_sheet_formula(tmp_path),
+            workbook_id=WORKBOOK_ID,
+            version=1,
+            acl_scope=FINANCE,
+        )
+        Indexer(client, settings, embedder=embedder).index_workbook(ingested)
+        app = create_app(settings)
+        app.state.client = client
+        app.state.embedder = embedder
+        return TestClient(app)
+
+    def test_hits_report_the_vector_retriever(self, hybrid: TestClient) -> None:
+        body = search(hybrid, "revenue forecast")
+        assert body["hits"]
+        assert any("embedding" in hit["matched_fields"] for hit in body["hits"])
+
+    def test_health_names_the_query_model(self, hybrid: TestClient) -> None:
+        assert hybrid.get("/health").json()["embedding_model"] == "hashing-test-double"
+
+    def test_a_scope_the_caller_lacks_hides_vector_hits_too(self, hybrid: TestClient) -> None:
+        response = hybrid.post(
+            "/api/v1/search/excel",
+            json={"query": "revenue forecast", "filters": {"acl_scopes": ["hr-team"]}},
+        )
+        assert response.json()["hits"] == []

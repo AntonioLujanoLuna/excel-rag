@@ -230,6 +230,60 @@ class TestNested:
         assert client.count(INDEX_CHUNKS, query) == 0
 
 
+class TestKnn:
+    """Exact cosine search, scored as a cluster scores a cosine `dense_vector`: (1 + cos) / 2."""
+
+    def _knn(self, vector: list[float], **extra: object) -> dict:
+        return {"knn": {"field": "embedding", "query_vector": vector, "k": 3, **extra}}
+
+    def test_orders_by_cosine_and_honours_k(self) -> None:
+        client = _vectors({"a": [1.0, 0.0], "b": [0.6, 0.8], "c": [0.0, 1.0], "d": [-1.0, 0.0]})
+        result = client.search(INDEX_CHUNKS, self._knn([1.0, 0.0]), size=10)
+        hits = result["hits"]["hits"]
+        assert [hit["_id"] for hit in hits] == ["a", "b", "c"]
+        assert hits[0]["_score"] == pytest.approx(1.0)
+        assert hits[2]["_score"] == pytest.approx(0.5)
+
+    def test_filters_apply_before_ranking(self) -> None:
+        client = _vectors({"a": [1.0, 0.0], "b": [0.6, 0.8]}, scopes={"a": "hr"})
+        query = self._knn([1.0, 0.0], filter=[{"term": {"acl_scope": "finance"}}])
+        hits = client.search(INDEX_CHUNKS, query, size=10)["hits"]["hits"]
+        assert [hit["_id"] for hit in hits] == ["b"]
+
+    def test_missing_or_mismatched_vectors_are_not_candidates(self) -> None:
+        client = _vectors({"a": [1.0, 0.0], "b": [1.0, 0.0, 0.0], "c": None})
+        hits = client.search(INDEX_CHUNKS, self._knn([1.0, 0.0]), size=10)["hits"]["hits"]
+        assert [hit["_id"] for hit in hits] == ["a"]
+
+    def test_knn_with_a_query_in_one_request_is_refused(self) -> None:
+        client = _vectors({"a": [1.0, 0.0]})
+        query = {**self._knn([1.0, 0.0]), "match_all": {}}
+        with pytest.raises(UnsupportedQueryError, match="separate"):
+            client.search(INDEX_CHUNKS, query, size=1)
+
+
+def _vectors(
+    vectors: dict[str, list[float] | None], scopes: dict[str, str] | None = None
+) -> InMemoryElasticsearch:
+    client = InMemoryElasticsearch()
+    client.create_index(INDEX_CHUNKS, {})
+    client.bulk_index(
+        INDEX_CHUNKS,
+        [
+            (
+                identifier,
+                {
+                    "id": identifier,
+                    "acl_scope": [(scopes or {}).get(identifier, "finance")],
+                    **({"embedding": vector} if vector is not None else {}),
+                },
+            )
+            for identifier, vector in vectors.items()
+        ],
+    )
+    return client
+
+
 class TestRefusals:
     @pytest.mark.parametrize(
         "query",
@@ -249,8 +303,8 @@ class TestRefusals:
         self, client: InMemoryElasticsearch
     ) -> None:
         with pytest.raises(UnsupportedQueryError) as excinfo:
-            client.search(INDEX_CHUNKS, {"knn": {}}, size=1)
-        assert "knn" in str(excinfo.value)
+            client.search(INDEX_CHUNKS, {"script_score": {}}, size=1)
+        assert "script_score" in str(excinfo.value)
         assert "match_all" in str(excinfo.value)
 
     def test_terms_requires_a_list(self, client: InMemoryElasticsearch) -> None:

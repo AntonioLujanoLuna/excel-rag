@@ -1,6 +1,6 @@
 """The one place Elasticsearch queries are built, and the one place they are filtered.
 
-Every read the service performs -- the primary BM25 search over ``excel_chunks``, a direct
+Every read the service performs -- the BM25 and ``knn`` searches over ``excel_chunks``, a direct
 structure query, a span-intersection query, and the ``_mget`` that fetches related nodes -- passes
 through this module. That is deliberate: the design's hard invariant is that the ACL filter and the
 active-version pin apply to primary hits, to every related-node lookup and to every direct
@@ -18,7 +18,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..es import ACL_FIELD, VERSION_KEY_FIELD, ElasticsearchLike, index_mappings
+from ..es import (
+    ACL_FIELD,
+    COLBERT_FIELD,
+    EMBEDDING_FIELD,
+    EMBEDDING_MODEL_FIELD,
+    VERSION_KEY_FIELD,
+    ElasticsearchLike,
+    index_mappings,
+)
+from ..live import build_knn_query
 from ..models import A1Range, ChunkDocument, SearchFilters, StructureDocument, version_key
 from ..settings import Settings
 
@@ -34,6 +43,19 @@ class UnknownWorkbook(LookupError):
     def __init__(self, workbook_id: str) -> None:
         super().__init__(workbook_id)
         self.workbook_id = workbook_id
+
+
+#: The fields a chunk search returns: everything but the vectors. A 768-float embedding is ~8 KB of
+#: JSON per hit, and neither fusion nor the response reads it -- ranking uses the index's scores.
+CHUNK_SOURCE_FIELDS: tuple[str, ...] = tuple(
+    name for name in ChunkDocument.model_fields if name not in (EMBEDDING_FIELD, COLBERT_FIELD)
+)
+
+#: ``num_candidates`` per shard for a ``knn`` query, as a multiple of ``k``: the HNSW search
+#: breadth. Larger is better recall for more latency; Elasticsearch caps it at 10,000.
+KNN_CANDIDATE_FACTOR = 4
+KNN_CANDIDATE_FLOOR = 100
+KNN_CANDIDATE_CEILING = 10_000
 
 
 class TooManyWorkbooks(LookupError):
@@ -234,12 +256,48 @@ class Repository:
         if filter_clauses:
             body["filter"] = filter_clauses
         es_query: dict[str, Any] = {"bool": body} if body else {"match_all": {}}
-        result = self._client.search(self.chunks_index, es_query, size=size)
-        scored: list[tuple[ChunkDocument, float]] = []
-        for hit in _hits(result):
-            chunk = ChunkDocument.model_validate(_source(hit))
-            scored.append((chunk, float(hit.get("_score") or 0.0)))
-        return scored
+        result = self._client.search(
+            self.chunks_index, es_query, size=size, source_includes=CHUNK_SOURCE_FIELDS
+        )
+        return _scored_chunks(result)
+
+    def knn_chunks(
+        self,
+        query_vector: Sequence[float],
+        *,
+        model: str,
+        filters: SearchFilters,
+        scope: Scope,
+        k: int,
+    ) -> list[tuple[ChunkDocument, float]]:
+        """The ``k`` chunks nearest ``query_vector``, under the same filters as the lexical query.
+
+        The ACL, version and facet filters go *inside* the ``knn`` clause, so they restrict the
+        candidates before the nearest neighbours are chosen -- a post-filter would return fewer
+        than ``k`` hits whenever a neighbour is filtered out. The ``embedding_model`` filter makes
+        a chunk embedded by another model a miss rather than a comparison across two spaces.
+        """
+        if not scope.versions:
+            return []
+        clauses = [
+            *scope.filters(),
+            *self._facet_filters(filters),
+            {"term": {EMBEDDING_MODEL_FIELD: model}},
+        ]
+        num_candidates = min(
+            max(k * KNN_CANDIDATE_FACTOR, KNN_CANDIDATE_FLOOR), KNN_CANDIDATE_CEILING
+        )
+        query = build_knn_query(
+            field=EMBEDDING_FIELD,
+            query_vector=query_vector,
+            k=k,
+            num_candidates=max(num_candidates, k),
+            filter=clauses,
+        )
+        result = self._client.search(
+            self.chunks_index, query, size=k, source_includes=CHUNK_SOURCE_FIELDS
+        )
+        return _scored_chunks(result)
 
     @staticmethod
     def _facet_filters(filters: SearchFilters) -> list[dict[str, Any]]:
@@ -392,6 +450,13 @@ class Repository:
 # -------------------------------------------------------------------------------------------------
 # Small helpers for the Elasticsearch response envelope
 # -------------------------------------------------------------------------------------------------
+def _scored_chunks(result: Mapping[str, Any]) -> list[tuple[ChunkDocument, float]]:
+    return [
+        (ChunkDocument.model_validate(_source(hit)), float(hit.get("_score") or 0.0))
+        for hit in _hits(result)
+    ]
+
+
 def _hits(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     hits = result.get("hits", {})
     inner = hits.get("hits", []) if isinstance(hits, Mapping) else []
@@ -406,6 +471,7 @@ def _source(hit: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 __all__ = [
+    "CHUNK_SOURCE_FIELDS",
     "MANIFEST_PAGE_SIZE",
     "NodeFetch",
     "Repository",

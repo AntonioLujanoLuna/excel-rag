@@ -10,18 +10,25 @@ supported:
 
 ``match_all``, ``term``, ``terms``, ``match``, ``range`` (including intersection with
 ``integer_range`` fields), ``bool`` with ``must`` / ``filter`` / ``should`` / ``must_not`` and
-``minimum_should_match``, and ``nested``.
+``minimum_should_match``, ``nested``, and a top-level ``knn`` (``field``, ``query_vector``, ``k``,
+``num_candidates``, ``filter``) issued on its own.
 
-Deliberately **not** supported: ``knn``, ``script_score``, ``function_score``, aggregations, and
-anything requiring a real analyzer. Dense-vector search is a production concern; a Python
-approximation here would let a benchmark claim a latency and a recall it never measured. Scores
-returned by this double are ordinal (counts of matched leaf clauses), not BM25, and must never be
-reported as relevance quality.
+``knn`` here is **exact**: every filtered document's vector is compared with the query by cosine
+similarity and scored ``(1 + cos) / 2``, as Elasticsearch scores a cosine ``dense_vector``. A
+cluster's HNSW search is approximate, so this is the *ceiling* of what a cluster returns, and no
+recall or latency measured against this double may be reported as the cluster's. A document whose
+vector is missing or of another dimensionality is not a candidate.
+
+Deliberately **not** supported: ``knn`` combined with a ``query`` in one request, ``script_score``,
+``function_score``, aggregations, and anything requiring a real analyzer. Lexical scores returned by
+this double are ordinal (counts of matched leaf clauses), not BM25, and must never be reported as
+relevance quality.
 """
 
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -30,7 +37,6 @@ from .es import ElasticsearchLike
 _SUPPORTED = frozenset({"match_all", "term", "terms", "match", "range", "bool", "nested"})
 _UNSUPPORTED = frozenset(
     {
-        "knn",
         "script",
         "script_score",
         "function_score",
@@ -158,9 +164,16 @@ class InMemoryElasticsearch:
     ) -> Mapping[str, Any]:
         self.calls.append(("search", index))
         self._require(index)
+        knn = query.get("knn")
+        if knn is not None and len(query) > 1:
+            raise UnsupportedQueryError(
+                "knn combined with a query in one request; issue them as separate searches"
+            )
         scored: list[tuple[float, str, Mapping[str, Any]]] = []
         for document_id, document in self._store[index].items():
-            score = self._score(document, query)
+            score = (
+                self._score_knn(document, knn) if knn is not None else self._score(document, query)
+            )
             if score is not None:
                 projected = (
                     {key: document[key] for key in source_includes if key in document}
@@ -169,6 +182,8 @@ class InMemoryElasticsearch:
                 )
                 scored.append((score, document_id, copy.deepcopy(projected)))
         scored.sort(key=lambda row: (-row[0], row[1]))
+        if knn is not None:
+            scored = scored[: int(knn.get("k", size))]
         window = scored[:size]
         return {
             "took": 0,
@@ -183,6 +198,22 @@ class InMemoryElasticsearch:
         }
 
     # -- internals --------------------------------------------------------------------------
+    def _score_knn(self, document: Mapping[str, Any], knn: Mapping[str, Any]) -> float | None:
+        field = knn.get("field")
+        query_vector = knn.get("query_vector")
+        if not isinstance(field, str) or not isinstance(query_vector, list):
+            raise UnsupportedQueryError("knn requires {'field': str, 'query_vector': [...], ...}")
+        filters = knn.get("filter") or []
+        if isinstance(filters, Mapping):
+            filters = [filters]
+        if not all(self._matches(document, clause) for clause in filters):
+            return None
+        stored = document.get(field)
+        if not isinstance(stored, list) or len(stored) != len(query_vector) or not stored:
+            return None
+        cosine = _cosine(query_vector, stored)
+        return None if cosine is None else (1.0 + cosine) / 2.0
+
     def _require(self, index: str) -> None:
         if index not in self._store:
             raise ValueError(f"no such index: {index}")
@@ -299,6 +330,13 @@ def _strip_prefix(query: Mapping[str, Any], path: str) -> dict[str, Any]:
         else:  # pragma: no cover - defensive
             rewritten[clause] = body
     return rewritten
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float | None:
+    """Cosine similarity, or ``None`` for a zero vector (a cluster refuses to index one)."""
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    return None if norm == 0.0 else dot / norm
 
 
 def _term_matches(value: Any, condition: Any) -> bool:

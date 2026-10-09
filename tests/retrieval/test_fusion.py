@@ -1,4 +1,4 @@
-"""Fusion tests: candidate-window re-rank, and the model-mismatch-is-a-miss rule."""
+"""Fusion tests: reciprocal-rank fusion of the lexical and knn lists, and hit provenance."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 from conftest import EMBED
 
 from excel_rag.models import ChunkDocument, ChunkType
-from excel_rag.retrieval.fusion import Candidate, cosine_similarity, matched_fields, rank
+from excel_rag.retrieval.fusion import RRF_K, fuse, matched_fields
 
 
 def _chunk(
@@ -35,69 +35,45 @@ def _chunk(
     )
 
 
-class TestCosineSimilarity:
-    def test_identical_vectors_score_one(self) -> None:
-        assert cosine_similarity((1.0, 0.0), (1.0, 0.0), EMBED, EMBED) == pytest.approx(1.0)
-
-    def test_orthogonal_vectors_score_zero(self) -> None:
-        assert cosine_similarity((1.0, 0.0), (0.0, 1.0), EMBED, EMBED) == pytest.approx(0.0)
-
-    def test_zero_vector_is_zero_not_a_crash(self) -> None:
-        assert cosine_similarity((0.0, 0.0), (1.0, 0.0), EMBED, EMBED) == 0.0
-
-    def test_different_model_is_a_miss(self) -> None:
-        assert cosine_similarity((1.0, 0.0), (1.0, 0.0), "other-model", EMBED) is None
-
-    def test_unknown_query_model_is_a_miss(self) -> None:
-        assert cosine_similarity((1.0, 0.0), (1.0, 0.0), EMBED, None) is None
-
-    def test_missing_embedding_is_a_miss(self) -> None:
-        assert cosine_similarity((1.0, 0.0), None, EMBED, EMBED) is None
-
-    def test_dimensionality_mismatch_is_a_miss(self) -> None:
-        assert cosine_similarity((1.0, 0.0), (1.0, 0.0, 0.0), EMBED, EMBED) is None
-
-
-class TestRank:
-    def test_lexical_only_preserves_order_and_score(self) -> None:
-        candidates = [
-            Candidate(chunk=_chunk("b"), lexical_score=1.0),
-            Candidate(chunk=_chunk("a"), lexical_score=2.0),
-        ]
-        ranked = rank(candidates)
+class TestFuse:
+    def test_lexical_only_preserves_order_and_the_index_score(self) -> None:
+        ranked = fuse([(_chunk("b"), 1.0), (_chunk("a"), 2.0)])
         assert [r.candidate.chunk.id for r in ranked] == ["a", "b"]
         assert ranked[0].score == 2.0
         assert not any(r.vector_matched for r in ranked)
 
     def test_ties_break_on_id(self) -> None:
-        candidates = [
-            Candidate(chunk=_chunk("b"), lexical_score=1.0),
-            Candidate(chunk=_chunk("a"), lexical_score=1.0),
-        ]
-        assert [r.candidate.chunk.id for r in rank(candidates)] == ["a", "b"]
-
-    def test_a_vector_promotes_a_lower_lexical_hit(self) -> None:
-        candidates = [
-            Candidate(chunk=_chunk("a", embedding=(1.0, 0.0), model="foreign"), lexical_score=2.0),
-            Candidate(chunk=_chunk("b", embedding=(1.0, 0.0)), lexical_score=1.0),
-        ]
-        ranked = rank(candidates, query_vector=(1.0, 0.0), query_model=EMBED)
-        # `a` wins lexically but its vector is from another model, so it earns no vector rank.
-        assert ranked[0].candidate.chunk.id == "b"
-        assert ranked[0].vector_matched is True
-        assert ranked[1].vector_matched is False
-
-    def test_a_foreign_model_vector_never_re_ranks(self) -> None:
-        candidates = [
-            Candidate(chunk=_chunk("a"), lexical_score=1.0),
-            Candidate(chunk=_chunk("b", embedding=(1.0, 0.0), model="foreign"), lexical_score=1.0),
-        ]
-        ranked = rank(candidates, query_vector=(1.0, 0.0), query_model=EMBED)
+        ranked = fuse([(_chunk("b"), 1.0), (_chunk("a"), 1.0)])
         assert [r.candidate.chunk.id for r in ranked] == ["a", "b"]
-        assert not any(r.vector_matched for r in ranked)
 
-    def test_empty_window_ranks_to_nothing(self) -> None:
-        assert rank([]) == []
+    def test_a_chunk_both_retrievers_found_outranks_one_found_once(self) -> None:
+        lexical = [(_chunk("a"), 3.0), (_chunk("b"), 2.0)]
+        vector = [(_chunk("b"), 0.9), (_chunk("c"), 0.8)]
+        ranked = fuse(lexical, vector)
+        assert [r.candidate.chunk.id for r in ranked] == ["b", "a", "c"]
+        assert ranked[0].score == pytest.approx(1 / (RRF_K + 2) + 1 / (RRF_K + 1))
+        assert [r.vector_matched for r in ranked] == [True, False, True]
+
+    def test_a_vector_only_hit_is_kept_with_its_scores(self) -> None:
+        (only,) = fuse([], [(_chunk("v"), 0.7)])
+        assert only.candidate.lexical_score is None
+        assert only.candidate.vector_score == 0.7
+        assert only.score == pytest.approx(1 / (RRF_K + 1))
+
+    def test_an_empty_vector_list_still_fuses(self) -> None:
+        """A vector query that found nothing is fused, not skipped: scores are on the RRF scale."""
+        (only,) = fuse([(_chunk("a"), 5.0)], [])
+        assert only.score == pytest.approx(1 / (RRF_K + 1))
+        assert not only.vector_matched
+
+    def test_a_repeated_chunk_keeps_its_best_rank(self) -> None:
+        ranked = fuse([(_chunk("a"), 2.0), (_chunk("a"), 1.0)], [])
+        assert len(ranked) == 1
+        assert ranked[0].score == pytest.approx(1 / (RRF_K + 1))
+
+    def test_nothing_fuses_to_nothing(self) -> None:
+        assert fuse([]) == []
+        assert fuse([], []) == []
 
 
 class TestMatchedFields:
@@ -109,3 +85,8 @@ class TestMatchedFields:
 
     def test_blank_query_matches_nothing(self) -> None:
         assert matched_fields("   ", _chunk("a")) == ()
+
+    def test_a_vector_match_is_reported_as_embedding(self) -> None:
+        chunk = _chunk("a", title="Projected revenue")
+        assert matched_fields("income", chunk, vector_matched=True) == ("embedding",)
+        assert matched_fields("revenue", chunk, vector_matched=True) == ("title", "embedding")

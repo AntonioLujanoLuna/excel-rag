@@ -9,6 +9,12 @@ Two inviolable rules from the design:
 * **Edges point at ranges, not cells.** ``SUM(Actuals!D2:D500)`` is *one* range edge; the rectangle
   is indexed once and overlaps are answered by an ``integer_range`` query at retrieval time.
 
+Tokenising is openpyxl's (:class:`openpyxl.formula.tokenizer.Tokenizer`): it separates function
+calls, string literals and reference operands, so a function whose name spells a cell (``LOG10``)
+or a string that spells one (``"B7"``) is never mistaken for a reference. Each ``OPERAND RANGE``
+token is then resolved on its own: a cell or rectangle, a whole column or row, a 3-D reference
+across a run of sheets, a structured table reference, or a defined name.
+
 The declared node ids come from :mod:`excel_rag.ingest.canonical`, so an edge target and the
 structure node it points at are produced by the same convention.
 """
@@ -17,7 +23,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from openpyxl.formula.tokenizer import (  # type: ignore[import-untyped]
+    Token,
+    Tokenizer,
+    TokenizerError,
+)
 
 from ..models import A1Range, Reference, ReferenceKind, UnresolvedReason, UnresolvedReference
 from .canonical import (
@@ -31,22 +43,20 @@ from .canonical import (
 
 _STRING_RE = re.compile(r'"(?:[^"]|"")*"')
 _EXTERNAL_RE = re.compile(
-    r"'[^']*\[[^\]]+\][^']*'|\[[^\]]+\.(?:xlsx?|xlsm|xlsb|csv|xls)\]|\[\d+\]", re.IGNORECASE
+    r"'[^']*\[[^\]]+\][^']*'|\[[^\]]+\.(?:xlsx?|xlsm|xlsb|csv|xls)\]|^\[\d+\]", re.IGNORECASE
 )
-_FUNC_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.]*)\s*\(")
-_TABLE_REF_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\s*\[([^\]]*)\]")
-_COL_RE = re.compile(
-    r"(?:(?:'(?P<qsheet>(?:[^']|'')+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
-    r"(?<![A-Za-z0-9_$])\$?(?P<start>[A-Za-z]{1,3}):\$?(?P<end>[A-Za-z]{1,3})(?![A-Za-z0-9_])"
-)
-_CELL_RE = re.compile(
-    r"(?:(?:'(?P<qsheet>(?:[^']|'')+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
-    r"(?<![A-Za-z0-9_$])(?P<start>\$?[A-Za-z]{1,3}\$?\d{1,7})"
-    r"(?::(?P<end>\$?[A-Za-z]{1,3}\$?\d{1,7}))?(?![A-Za-z0-9_]|\s*\()"
-)
-_IDENT_RE = re.compile(r"(?<![A-Za-z0-9_.$])(?P<name>[A-Za-z_][A-Za-z0-9_.]*)(?![A-Za-z0-9_(])")
-_SPILL_RE = re.compile(r"(?:[)\]]|\d)\s*#")
-_AT_RE = re.compile(r"(?<![\w.])@")
+#: A spill operator: ``#`` right after a reference or a call, before an operator or the end. The
+#: tokenizer refuses it, so it is recorded as a gap and stripped before tokenising.
+_SPILL_RE = re.compile(r"(?<=[A-Za-z0-9_$)\]])\s*#(?=\s*(?:$|[-+*/^&=<>,;)\s:]))")
+_AT_RE = re.compile(r"(?<![\w.\[])@")
+_SHEET_REF_RE = re.compile(r"(?:'(?P<quoted>(?:[^']|'')+)'|(?P<bare>[^'!]+))!(?P<ref>.+)")
+_CELL_REF_RE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?")
+_COLUMNS_REF_RE = re.compile(r"\$?(?P<start>[A-Za-z]{1,3}):\$?(?P<end>[A-Za-z]{1,3})")
+_ROWS_REF_RE = re.compile(r"\$?(?P<start>\d{1,7}):\$?(?P<end>\d{1,7})")
+_TABLE_REF_RE = re.compile(r"(?P<table>[A-Za-z_\\][A-Za-z0-9_.]*)?\s*\[(?P<spec>.*)\]")
+_NAME_RE = re.compile(r"[A-Za-z_\\][A-Za-z0-9_.]*")
+#: Functions that bind local names; inside them a bare identifier is a variable, not a name.
+_BINDING_FUNCTIONS = frozenset({"LET", "LAMBDA"})
 
 #: Functions whose result is a dynamic array: they cannot be flattened to static edges.
 _DYNAMIC_FUNCTIONS = frozenset(
@@ -119,6 +129,11 @@ class FormulaContext:
     sheet_max_row: Mapping[str, int]
     tables: Mapping[str, TableInfo]
     defined_names: Mapping[str, NamedRangeInfo]
+    #: Workbook sheet order, which a 3-D reference (``Jan:Mar!B2``) spans. Empty means unknown, and
+    #: a 3-D reference is then a gap rather than a guess.
+    sheet_order: tuple[str, ...] = ()
+    #: Used width per sheet, the extent a whole-row reference (``2:2``) is clipped to.
+    sheet_max_col: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,78 +162,47 @@ def _blank(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(chars)
 
 
-def _helper_spans(text: str) -> tuple[list[tuple[int, int]], list[UnresolvedReference]]:
-    """Spans of string literals, external links and table refs, and the gaps they imply."""
-    spans: list[tuple[int, int]] = []
-    unresolved: list[UnresolvedReference] = []
-    for match in _STRING_RE.finditer(text):
-        spans.append(match.span())
-    for match in _EXTERNAL_RE.finditer(text):
-        spans.append(match.span())
-        unresolved.append(
-            UnresolvedReference(
-                reference_text=match.group(0).strip(),
-                reason=UnresolvedReason.EXTERNAL_LINK,
-                detail="external workbook or link index is not resolved during ingestion",
-            )
-        )
-    return spans, unresolved
+def _gap(text: str, reason: UnresolvedReason, detail: str) -> UnresolvedReference:
+    return UnresolvedReference(reference_text=text, reason=reason, detail=detail)
 
 
-def _scan_functions(text: str) -> list[UnresolvedReference]:
-    found: list[UnresolvedReference] = []
-    if re.search(r"\bINDIRECT\s*\(", text, re.IGNORECASE):
-        found.append(
-            UnresolvedReference(
-                reference_text="INDIRECT(...)",
-                reason=UnresolvedReason.INDIRECT,
-                detail="INDIRECT target depends on a runtime string; not statically resolvable",
+def _function_gaps(raw_name: str) -> list[UnresolvedReference]:
+    """The gaps a function call implies, by name alone."""
+    upper = raw_name.upper()
+    base = upper.rsplit(".", 1)[-1]
+    if base == "INDIRECT":
+        return [
+            _gap(
+                "INDIRECT(...)",
+                UnresolvedReason.INDIRECT,
+                "INDIRECT target depends on a runtime string; not statically resolvable",
             )
-        )
-    if re.search(r"\bOFFSET\s*\(", text, re.IGNORECASE):
-        found.append(
-            UnresolvedReference(
-                reference_text="OFFSET(...)",
-                reason=UnresolvedReason.VOLATILE_OFFSET,
-                detail="OFFSET is volatile; its target is not statically resolvable",
+        ]
+    if base == "OFFSET":
+        return [
+            _gap(
+                "OFFSET(...)",
+                UnresolvedReason.VOLATILE_OFFSET,
+                "OFFSET is volatile; its target is not statically resolvable",
             )
-        )
-    for match in _FUNC_RE.finditer(text):
-        raw = match.group(1)
-        base = raw.upper().rsplit(".", 1)[-1]
-        if base in _DYNAMIC_FUNCTIONS:
-            found.append(
-                UnresolvedReference(
-                    reference_text=f"{raw}(...)",
-                    reason=UnresolvedReason.DYNAMIC_ARRAY,
-                    detail="dynamic-array formula; precedents cannot be flattened to static edges",
-                )
+        ]
+    if base in _DYNAMIC_FUNCTIONS:
+        return [
+            _gap(
+                f"{raw_name}(...)",
+                UnresolvedReason.DYNAMIC_ARRAY,
+                "dynamic-array formula; precedents cannot be flattened to static edges",
             )
-        elif raw.upper().startswith(("_XLFN.", "_XLUDF.")):
-            found.append(
-                UnresolvedReference(
-                    reference_text=f"{raw}(...)",
-                    reason=UnresolvedReason.UNSUPPORTED_FUNCTION,
-                    detail="function form is not supported for static reference extraction",
-                )
+        ]
+    if upper.startswith(("_XLFN.", "_XLUDF.")):
+        return [
+            _gap(
+                f"{raw_name}(...)",
+                UnresolvedReason.UNSUPPORTED_FUNCTION,
+                "function form is not supported for static reference extraction",
             )
-    if _AT_RE.search(text):
-        found.append(
-            UnresolvedReference(
-                reference_text="@",
-                reason=UnresolvedReason.DYNAMIC_ARRAY,
-                detail="implicit-intersection '@' operator is not statically resolvable",
-            )
-        )
-    if _SPILL_RE.search(text):
-        found.append(
-            UnresolvedReference(
-                reference_text="#",
-                reason=UnresolvedReason.DYNAMIC_ARRAY,
-                detail="spill-range '#' reference is not statically resolvable",
-            )
-        )
-    return found
+        ]
+    return []
 
 
 def _last_bracket_token(spec: str) -> str:
@@ -233,71 +217,53 @@ def _last_bracket_token(spec: str) -> str:
     return flat[-1] if flat else ""
 
 
-def _explicit_sheet(match: re.Match[str]) -> str | None:
-    """The sheet a reference names, with a quoted name's doubled ``''`` unescaped."""
-    quoted = match.group("qsheet")
-    if quoted is not None:
-        return quoted.replace("''", "'")
-    return match.group("sheet")
-
-
-def _resolve_sheet(
-    explicit: str | None,
+def _check_sheet(
+    sheet: str,
     context: FormulaContext,
     unresolved: list[UnresolvedReference],
     reference_text: str,
-) -> str | None:
-    sheet = explicit or context.sheet_name
+) -> bool:
     if sheet in context.macro_sheets:
         unresolved.append(
-            UnresolvedReference(
-                reference_text=reference_text,
-                reason=UnresolvedReason.MACRO_SHEET,
-                detail=f"{sheet!r} is a macro sheet; its cells are not loaded",
+            _gap(
+                reference_text,
+                UnresolvedReason.MACRO_SHEET,
+                f"{sheet!r} is a macro sheet; its cells are not loaded",
             )
         )
-        return None
+        return False
     if sheet not in context.known_sheets:
         unresolved.append(
-            UnresolvedReference(
-                reference_text=reference_text,
-                reason=UnresolvedReason.OUT_OF_RANGE,
-                detail=f"no such sheet: {sheet!r}",
-            )
+            _gap(reference_text, UnresolvedReason.OUT_OF_RANGE, f"no such sheet: {sheet!r}")
         )
-        return None
-    return sheet
+        return False
+    return True
 
 
-def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
-    """Parse one formula into typed edges and explicit gaps. Pure text analysis; no evaluation."""
-    text = formula[1:] if formula.startswith("=") else formula
-    unresolved: list[UnresolvedReference] = []
-    unresolved.extend(_scan_functions(text))
-    spans, external_unresolved = _helper_spans(text)
-    unresolved.extend(external_unresolved)
-    clean = _blank(text, spans)
+class _Collector:
+    """Accumulates de-duplicated edges and gaps for one formula."""
 
-    edges: list[ReferenceEdge] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    structure_spans: list[tuple[int, int]] = []
+    def __init__(self, context: FormulaContext) -> None:
+        self.context = context
+        self.edges: list[ReferenceEdge] = []
+        self.unresolved: list[UnresolvedReference] = []
+        self._seen_edges: set[tuple[str, str, str, str]] = set()
 
-    def add_edge(
+    def edge(
+        self,
         target: str,
         sheet_name: str,
         a1: str,
         kind: ReferenceKind,
         absolute: bool,
-        min_row: int,
-        max_row: int,
-        min_col: int,
-        max_col: int,
+        bounds: tuple[int, int, int, int],
     ) -> None:
         key = (target, sheet_name, a1, kind.value)
-        if key in seen:
+        if key in self._seen_edges:
             return
-        seen.add(key)
-        edges.append(
+        self._seen_edges.add(key)
+        min_row, max_row, min_col, max_col = bounds
+        self.edges.append(
             ReferenceEdge(
                 reference=Reference(
                     target_node_id=target, sheet_name=sheet_name, a1_range=a1, kind=kind
@@ -310,150 +276,314 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
             )
         )
 
-    # 1. structured table references: Name[Column]
-    for match in _TABLE_REF_RE.finditer(clean):
-        structure_spans.append(match.span())
-        name = match.group(1)
-        info = context.tables.get(name) or context.tables.get(name.lower())
-        if info is None:
-            unresolved.append(
-                UnresolvedReference(
-                    reference_text=match.group(0),
-                    reason=UnresolvedReason.OUT_OF_RANGE,
-                    detail=f"structured reference to unknown table {name!r}",
-                )
-            )
-            continue
-        column = _last_bracket_token(match.group(2))
-        if not column or column.startswith("#"):
-            add_edge(
-                range_node_id(
-                    context.workbook_id, context.version, info.sheet_name, info.a1_range.a1
-                ),
-                info.sheet_name,
-                info.a1_range.a1,
-                ReferenceKind.RANGE,
-                True,
-                info.a1_range.min_row,
-                info.a1_range.max_row,
-                info.a1_range.min_col,
-                info.a1_range.max_col,
-            )
-            continue
-        matched_column = next(
-            (existing for existing in info.columns if existing.lower() == column.lower()), None
+    def gap(self, text: str, reason: UnresolvedReason, detail: str) -> None:
+        self.unresolved.append(_gap(text, reason, detail))
+
+    def rectangle(self, sheet: str, region: A1Range, absolute: bool) -> None:
+        """An edge to a cell node, or to a range node for anything wider."""
+        context = self.context
+        is_cell = region.cell_count == 1
+        target = (
+            cell_node_id(context.workbook_id, context.version, sheet, region.a1)
+            if is_cell
+            else range_node_id(context.workbook_id, context.version, sheet, region.a1)
         )
-        if matched_column is None:
-            unresolved.append(
-                UnresolvedReference(
-                    reference_text=match.group(0),
-                    reason=UnresolvedReason.OUT_OF_RANGE,
-                    detail=f"table {info.name!r} has no column {column!r}",
-                )
-            )
-            continue
-        add_edge(
-            table_column_node_id(
-                context.workbook_id, context.version, info.sheet_name, info.name, matched_column
-            ),
-            info.sheet_name,
-            f"{column_letter(info.a1_range.min_col)}:{column_letter(info.a1_range.max_col)}",
-            ReferenceKind.TABLE_COLUMN,
-            True,
-            info.a1_range.min_row,
-            info.a1_range.max_row,
-            info.a1_range.min_col,
-            info.a1_range.max_col,
+        self.edge(
+            target,
+            sheet,
+            region.a1,
+            ReferenceKind.CELL if is_cell else ReferenceKind.RANGE,
+            absolute,
+            (region.min_row, region.max_row, region.min_col, region.max_col),
         )
 
-    # 2. whole-column references: A:B
-    col_clean = _blank(clean, structure_spans)
-    col_spans: list[tuple[int, int]] = []
-    for match in _COL_RE.finditer(col_clean):
-        col_spans.append(match.span())
-        reference_text = match.group(0)
-        sheet = _resolve_sheet(_explicit_sheet(match), context, unresolved, reference_text)
-        if sheet is None:
-            continue
-        start_col = A1Range.parse(sheet, f"{match.group('start')}1")
-        end_col = A1Range.parse(sheet, f"{match.group('end')}1")
+
+def _resolve_table(collector: _Collector, text: str, table: str | None, spec: str) -> None:
+    context = collector.context
+    if table is None:
+        collector.gap(
+            text,
+            UnresolvedReason.OUT_OF_RANGE,
+            "structured reference without a table name; its table depends on the formula's cell",
+        )
+        return
+    info = context.tables.get(table) or context.tables.get(table.lower())
+    if info is None:
+        collector.gap(
+            text, UnresolvedReason.OUT_OF_RANGE, f"structured reference to unknown table {table!r}"
+        )
+        return
+    bounds = (
+        info.a1_range.min_row,
+        info.a1_range.max_row,
+        info.a1_range.min_col,
+        info.a1_range.max_col,
+    )
+    column = _last_bracket_token(spec)
+    if not column or column.startswith("#"):
+        collector.edge(
+            range_node_id(context.workbook_id, context.version, info.sheet_name, info.a1_range.a1),
+            info.sheet_name,
+            info.a1_range.a1,
+            ReferenceKind.RANGE,
+            True,
+            bounds,
+        )
+        return
+    matched = next((name for name in info.columns if name.lower() == column.lower()), None)
+    if matched is None:
+        collector.gap(
+            text, UnresolvedReason.OUT_OF_RANGE, f"table {info.name!r} has no column {column!r}"
+        )
+        return
+    collector.edge(
+        table_column_node_id(
+            context.workbook_id, context.version, info.sheet_name, info.name, matched
+        ),
+        info.sheet_name,
+        f"{column_letter(info.a1_range.min_col)}:{column_letter(info.a1_range.max_col)}",
+        ReferenceKind.TABLE_COLUMN,
+        True,
+        bounds,
+    )
+
+
+def _resolve_on_sheet(collector: _Collector, text: str, sheet: str, ref: str) -> bool:
+    """Resolve the part after ``Sheet!`` (or a bare operand) on one sheet.
+
+    Returns ``False`` when ``ref`` is not a coordinate form at all, so the caller can try it as a
+    defined name.
+    """
+    context = collector.context
+    absolute = "$" in ref
+    if _CELL_REF_RE.fullmatch(ref):
+        try:
+            region = A1Range.parse(sheet, ref)
+        except ValueError:
+            collector.gap(text, UnresolvedReason.MALFORMED, "not a parseable A1 reference")
+            return True
+        collector.rectangle(sheet, region, absolute)
+        return True
+    columns = _COLUMNS_REF_RE.fullmatch(ref)
+    if columns is not None:
+        first = A1Range.parse(sheet, f"{columns.group('start')}1").min_col
+        last = A1Range.parse(sheet, f"{columns.group('end')}1").min_col
+        first, last = min(first, last), max(first, last)
         max_row = context.sheet_max_row.get(sheet, 1)
-        a1 = f"{column_letter(start_col.min_col)}1:{column_letter(end_col.max_col)}{max_row}"
-        add_edge(
+        a1 = f"{column_letter(first)}1:{column_letter(last)}{max_row}"
+        collector.edge(
             range_node_id(context.workbook_id, context.version, sheet, a1),
             sheet,
             a1,
             ReferenceKind.RANGE,
-            False,
-            1,
-            max_row,
-            start_col.min_col,
-            end_col.max_col,
-        )
-
-    # 3. A1 cell and range references
-    cell_clean = _blank(col_clean, col_spans)
-    cell_spans: list[tuple[int, int]] = []
-    for match in _CELL_RE.finditer(cell_clean):
-        cell_spans.append(match.span())
-        reference_text = match.group(0)
-        explicit = _explicit_sheet(match)
-        sheet = _resolve_sheet(explicit, context, unresolved, reference_text)
-        if sheet is None:
-            continue
-        start = match.group("start") or ""
-        end = match.group("end")
-        try:
-            parsed = A1Range.parse(sheet, f"{start}:{end}" if end else start)
-        except ValueError:
-            unresolved.append(
-                UnresolvedReference(
-                    reference_text=reference_text,
-                    reason=UnresolvedReason.MALFORMED,
-                    detail="not a parseable A1 reference",
-                )
-            )
-            continue
-        absolute = "$" in start or (end is not None and "$" in end)
-        is_cell = parsed.min_row == parsed.max_row and parsed.min_col == parsed.max_col
-        kind = ReferenceKind.CELL if is_cell else ReferenceKind.RANGE
-        target = (
-            cell_node_id(context.workbook_id, context.version, sheet, parsed.a1)
-            if is_cell
-            else range_node_id(context.workbook_id, context.version, sheet, parsed.a1)
-        )
-        add_edge(
-            target,
-            sheet,
-            parsed.a1,
-            kind,
             absolute,
-            parsed.min_row,
-            parsed.max_row,
-            parsed.min_col,
-            parsed.max_col,
+            (1, max_row, first, last),
         )
+        return True
+    rows = _ROWS_REF_RE.fullmatch(ref)
+    if rows is not None:
+        first, last = sorted((int(rows.group("start")), int(rows.group("end"))))
+        if first < 1:
+            collector.gap(text, UnresolvedReason.MALFORMED, "row 0 does not exist")
+            return True
+        max_col = context.sheet_max_col.get(sheet, 1)
+        a1 = f"A{first}:{column_letter(max_col)}{last}"
+        collector.edge(
+            range_node_id(context.workbook_id, context.version, sheet, a1),
+            sheet,
+            a1,
+            ReferenceKind.RANGE,
+            absolute,
+            (first, last, 1, max_col),
+        )
+        return True
+    if "#REF!" in ref.upper():
+        collector.gap(text, UnresolvedReason.MALFORMED, "broken reference (#REF!)")
+        return True
+    return False
 
-    # 4. named ranges: bare identifiers that match a defined name
-    ident_clean = _blank(cell_clean, cell_spans)
-    for match in _IDENT_RE.finditer(ident_clean):
-        name = match.group("name")
-        defined = context.defined_names.get(name.lower())
-        if defined is None:
-            continue
-        add_edge(
+
+def _resolve_name(collector: _Collector, text: str, name: str, *, binds_names: bool) -> None:
+    context = collector.context
+    defined = context.defined_names.get(name.lower())
+    if defined is not None:
+        collector.edge(
             named_range_node_id(context.workbook_id, context.version, defined.name),
             defined.sheet_name,
             defined.a1_range.a1,
             ReferenceKind.NAMED_RANGE,
             True,
-            defined.a1_range.min_row,
-            defined.a1_range.max_row,
-            defined.a1_range.min_col,
-            defined.a1_range.max_col,
+            (
+                defined.a1_range.min_row,
+                defined.a1_range.max_row,
+                defined.a1_range.min_col,
+                defined.a1_range.max_col,
+            ),
+        )
+        return
+    if binds_names:
+        # Inside LET/LAMBDA a bare identifier is a local variable; the formula is already a gap.
+        return
+    collector.gap(
+        text,
+        UnresolvedReason.OUT_OF_RANGE,
+        f"name {name!r} is undefined or does not resolve to a static rectangle",
+    )
+
+
+def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> None:
+    context = collector.context
+    text = raw.strip()
+    if text.startswith("@"):
+        text = text[1:]
+    if not text:
+        return
+    if _EXTERNAL_RE.search(text):
+        collector.gap(
+            raw.strip(),
+            UnresolvedReason.EXTERNAL_LINK,
+            "external workbook or link index is not resolved during ingestion",
+        )
+        return
+
+    table = _TABLE_REF_RE.fullmatch(text)
+    if table is not None:
+        _resolve_table(collector, text, table.group("table"), table.group("spec"))
+        return
+
+    qualified = _SHEET_REF_RE.fullmatch(text)
+    if qualified is None:
+        if not _resolve_on_sheet(collector, text, context.sheet_name, text):
+            if _NAME_RE.fullmatch(text):
+                _resolve_name(collector, text, text, binds_names=binds_names)
+            else:
+                collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
+        return
+
+    quoted = qualified.group("quoted")
+    sheet_part = quoted.replace("''", "'") if quoted is not None else qualified.group("bare")
+    ref = qualified.group("ref")
+    # `Sheet1!A1:Sheet1!B2` names the sheet twice; anything else across sheets is not a rectangle.
+    if "!" in ref:
+        head, _, tail = ref.partition(":")
+        tail_match = _SHEET_REF_RE.fullmatch(tail)
+        if tail_match is None:
+            collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
+            return
+        tail_quoted = tail_match.group("quoted")
+        tail_sheet = (
+            tail_quoted.replace("''", "'") if tail_quoted is not None else tail_match.group("bare")
+        )
+        if tail_sheet != sheet_part:
+            collector.gap(text, UnresolvedReason.MALFORMED, "a range cannot span two sheets")
+            return
+        ref = f"{head}:{tail_match.group('ref')}"
+
+    if ":" in sheet_part:
+        _resolve_three_d(collector, text, sheet_part, ref)
+        return
+    if not _check_sheet(sheet_part, context, collector.unresolved, text):
+        return
+    if not _resolve_on_sheet(collector, text, sheet_part, ref):
+        if _NAME_RE.fullmatch(ref):
+            # A sheet-scoped defined name: `Inputs!Rate`.
+            _resolve_name(collector, text, ref, binds_names=binds_names)
+        else:
+            collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
+
+
+def _resolve_three_d(collector: _Collector, text: str, sheet_part: str, ref: str) -> None:
+    """``Jan:Mar!B2`` reads ``B2`` on every sheet from ``Jan`` to ``Mar``, in workbook order."""
+    context = collector.context
+    first, _, last = sheet_part.partition(":")
+    order = context.sheet_order
+    if not order:
+        collector.gap(
+            text,
+            UnresolvedReason.OUT_OF_RANGE,
+            "3-D reference, but the workbook's sheet order is unknown",
+        )
+        return
+    for sheet in (first, last):
+        if sheet not in order:
+            collector.gap(text, UnresolvedReason.OUT_OF_RANGE, f"no such sheet: {sheet!r}")
+            return
+    start, end = sorted((order.index(first), order.index(last)))
+    for sheet in order[start : end + 1]:
+        if not _check_sheet(sheet, context, collector.unresolved, text):
+            continue
+        if not _resolve_on_sheet(collector, text, sheet, ref):
+            collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
+            return
+
+
+def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
+    """Parse one formula into typed edges and explicit gaps. Pure text analysis; no evaluation."""
+    text = formula[1:] if formula.startswith("=") else formula
+    collector = _Collector(context)
+
+    # Spill and implicit-intersection operators are judged on the text outside string literals.
+    outside_strings = _blank(text, [match.span() for match in _STRING_RE.finditer(text)])
+    if _AT_RE.search(outside_strings):
+        collector.gap(
+            "@",
+            UnresolvedReason.DYNAMIC_ARRAY,
+            "implicit-intersection '@' operator is not statically resolvable",
+        )
+    spills = [match.span() for match in _SPILL_RE.finditer(outside_strings)]
+    if spills:
+        collector.gap(
+            "#",
+            UnresolvedReason.DYNAMIC_ARRAY,
+            "spill-range '#' reference is not statically resolvable",
         )
 
-    return ParsedFormula(references=tuple(edges), unresolved=tuple(unresolved))
+    try:
+        tokens: list[Token] = Tokenizer("=" + _blank_out(text, spills)).items
+    except TokenizerError as exc:
+        collector.gap(
+            text[:200], UnresolvedReason.MALFORMED, f"formula could not be tokenised: {exc}"
+        )
+        return ParsedFormula(references=(), unresolved=tuple(collector.unresolved))
+
+    binds_names = any(
+        token.type == Token.FUNC
+        and token.subtype == Token.OPEN
+        and token.value[:-1].strip().upper().rsplit(".", 1)[-1] in _BINDING_FUNCTIONS
+        for token in tokens
+    )
+    for token in tokens:
+        if token.type == Token.FUNC and token.subtype == Token.OPEN:
+            name = token.value[:-1].strip()
+            if ":" in name:
+                # `A1:INDEX(...)`: one end of the range is a function result.
+                anchor, _, name = name.rpartition(":")
+                collector.gap(
+                    f"{anchor}:{name}(...)",
+                    UnresolvedReason.UNSUPPORTED_FUNCTION,
+                    "a range bounded by a function result is not statically resolvable",
+                )
+            collector.unresolved.extend(_function_gaps(name))
+        elif token.type == Token.OPERAND and token.subtype == Token.RANGE:
+            _resolve_operand(collector, token.value, binds_names=binds_names)
+        elif token.type == Token.OPERAND and token.subtype == Token.ERROR:
+            if token.value.upper() == "#REF!":
+                collector.gap(token.value, UnresolvedReason.MALFORMED, "broken reference (#REF!)")
+
+    return ParsedFormula(references=tuple(collector.edges), unresolved=tuple(collector.unresolved))
+
+
+def _blank_out(text: str, spans: list[tuple[int, int]]) -> str:
+    """Delete the given spans (the spill operators the tokenizer refuses)."""
+    if not spans:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(text[cursor:start])
+        cursor = end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
 
 def resolve_named_range(

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from excel_rag.ingest import ingest_workbook
+from excel_rag.ingest.build import normalize_formula
 from excel_rag.ingest.canonical import workbook_node_id
 from excel_rag.models import ChunkType, NodeType
 
@@ -128,3 +131,22 @@ def test_acl_scope_and_provenance_are_stamped(build) -> None:
     assert all(chunk.acl_scope == ("finance",) for chunk in ingested.chunks)
     assert all(chunk.source_file == "two_tables.xlsx" for chunk in ingested.chunks)
     assert all(chunk.source_sha256 for chunk in ingested.chunks)
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "same"),
+    [
+        ("=B2*$B$1", "=B3*$B$1", True),
+        ("=B2+100", "=B3+200", False),
+        ("=LOG10(A2)", "=LOG10(A3)", True),
+        ('="Q1"&A2', '="Q2"&A3', False),
+        ("=SUM(A2:C2)", "=SUM(A3:C3)", True),
+        ("=$A2*2", "=$A3*2", True),
+    ],
+)
+def test_cluster_patterns_rewrite_references_only(left: str, right: str, same: bool) -> None:
+    assert (normalize_formula(left) == normalize_formula(right)) is same
+
+
+def test_cluster_pattern_keeps_the_formula_text_around_references() -> None:
+    assert normalize_formula('=IF(A2>0,"A2",LOG10(B2))') == '=IF(A#>0,"A2",LOG10(B#))'

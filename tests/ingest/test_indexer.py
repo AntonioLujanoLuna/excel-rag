@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from excel_rag.embedding import HashingEmbedder
 from excel_rag.es import INDEX_CHUNKS, INDEX_MAPPINGS, INDEX_STRUCTURE, INDEX_VERSIONS
 from excel_rag.fake_es import InMemoryElasticsearch, in_memory_client
 from excel_rag.ingest import IngestError, ingest_workbook
@@ -101,6 +102,41 @@ def test_every_document_carries_its_run_and_version_key(build) -> None:
     body = document_body(ingested.structure[0], "run-1")
     assert body["ingest_run"] == "run-1"
     assert body["version_key"] == "wb:v3"
+
+
+def test_chunks_carry_the_embedders_vectors_and_model(build) -> None:
+    settings = Settings()
+    client = in_memory_client(settings)
+    embedder = HashingEmbedder(settings.embedding.dims)
+    ingested = ingest_workbook(build.path("cross_sheet_formula"), workbook_id="wb", version=1)
+    result = Indexer(client, settings, embedder=embedder).index_workbook(ingested)
+
+    assert result.embedding_model == embedder.model_name
+    for chunk in ingested.chunks:
+        stored = client.get_document(INDEX_CHUNKS, chunk.id)
+        assert stored is not None
+        assert len(stored["embedding"]) == settings.embedding.dims
+        assert stored["embedding_model"] == embedder.model_name
+    node = client.get_document(INDEX_STRUCTURE, ingested.structure[0].node_id)
+    assert node is not None and "embedding" not in node
+
+
+def test_no_embedder_means_no_vectors(build) -> None:
+    client, _ = _indexer()
+    ingested = ingest_workbook(build.path("cross_sheet_formula"), workbook_id="wb", version=1)
+    result = Indexer(client, Settings(), embedder=None).index_workbook(ingested)
+    assert result.embedding_model is None
+    stored = client.get_document(INDEX_CHUNKS, ingested.chunks[0].id)
+    assert stored is not None and "embedding" not in stored
+
+
+def test_a_vector_of_the_wrong_size_writes_nothing(build) -> None:
+    client, _ = _indexer()
+    ingested = ingest_workbook(build.path("cross_sheet_formula"), workbook_id="wb", version=1)
+    with pytest.raises(IngestError, match="768"):
+        Indexer(client, Settings(), embedder=HashingEmbedder(16)).index_workbook(ingested)
+    assert client.count(INDEX_CHUNKS) == 0
+    assert client.count(INDEX_VERSIONS) == 0
 
 
 def test_budget_refusal(build) -> None:

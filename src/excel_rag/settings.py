@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -28,10 +30,25 @@ class BudgetSettings(BaseModel):
 
 
 class EmbeddingSettings(BaseModel):
+    """The dense-vector model, used at ingestion for chunks and at search time for the query.
+
+    The default is ``lightonai/mDenseOn`` run in-process through sentence-transformers (the
+    ``embed`` extra). ``hashing`` is a deterministic test double with no semantics; ``none`` indexes
+    and searches without vectors (lexical only). Changing ``model`` or ``dims`` means re-indexing:
+    a query vector is only ever compared with chunks embedded by the same model.
+    """
+
+    provider: Literal["sentence-transformers", "hashing", "none"] = "sentence-transformers"
+    model: str = Field(
+        default="lightonai/mDenseOn", description="Recorded on every chunk document."
+    )
     dims: int = Field(default=768, ge=8)
-    model: str = Field(default="unspecified", description="Recorded on every chunk document.")
-    #: Whether the query embedding is produced in-process (False) or supplied by the caller.
-    embed_queries_locally: bool = False
+    batch_size: int = Field(default=32, ge=1)
+    #: Token cap per text. mDenseOn accepts 8,192, but a chunk is a description of a region, not a
+    #: document, and on CPU the cost grows with the length; long chunks are truncated, not refused.
+    max_seq_length: int | None = Field(default=1024, ge=16)
+    #: ``cpu``, ``cuda``, ``mps``... ``None`` lets sentence-transformers pick.
+    device: str | None = None
 
 
 class ElasticsearchSettings(BaseModel):

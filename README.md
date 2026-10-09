@@ -1,0 +1,123 @@
+# excel-rag
+
+**Structure-aware RAG over Excel workbooks.** An `.xlsx`/`.xlsm` is treated like a codebase:
+worksheets are source files, tables and named ranges are symbols, formulas are the dependency
+graph. Both the semantics and that structure are indexed in Elasticsearch, and one stateless
+endpoint answers a semantic query with **exact coordinates, values and statically resolved
+references**.
+
+Design: `ideas/excel_rag_structure_aware_elasticsearch_search.md` (the proposal this implements).
+
+## The constraint, and what follows from it
+
+**Elasticsearch is the only persistent search/vector/metadata store.** No graph database, no SQL
+engine, no second datastore. That forces three decisions:
+
+- The canonical workbook representation exists **only during ingestion**; the durable copy of the
+  structure is the `excel_structure` index.
+- References are resolved **at ingestion** into typed edges between stable node ids. A retrieval
+  request never parses a formula.
+- Range overlap is answered by **`integer_range` intersection**, not by walking cells, which is what
+  keeps a `SUM(Actuals!D2:D500)` edge from becoming 499 edges.
+
+## Architecture
+
+```text
+Excel (.xlsx / .xlsm)
+        |
+  ingestion (openpyxl + region detection + formula parser)
+        |
+  canonical representation (in memory: hierarchy, ranges, tables, values, dependencies)
+        |
+  embedding pipeline + bulk index
+        |
+        +--------------------------------+
+        | Elasticsearch                  |
+        |   excel_chunks    <- BM25 / dense vectors / ColBERT
+        |   excel_structure <- nodes, values, typed edges
+        |   excel_versions  <- active version per workbook
+        +--------------------------------+
+                       ^
+         stateless FastAPI: POST /api/v1/search/excel
+                       |
+        hits + A1 coordinates + optional related nodes
+        + unresolved references + truncation metadata
+```
+
+## Two indices
+
+`excel_chunks` holds what is *searchable* — workbook and sheet summaries, region and table
+descriptions, column schemas, contextualized row groups, formula summaries — with the A1 range,
+headers, ACL scope and the embedding model that produced the vector.
+
+`excel_structure` holds what is *exact* — cells, ranges, tables, columns, named ranges, formulas —
+with `row_span`/`column_span` as `integer_range` fields, the cached value, the formula text, and
+`references` as nested typed edges. Unresolvable references (`INDIRECT`, volatile `OFFSET`,
+external links, unsupported dynamic arrays) are stored with their reason, never invented.
+
+Both mappings are data in `src/excel_rag/es.py`, and a test asserts the code only touches fields
+the mappings declare — Elasticsearch happily accepts a document whose unknown field can then never
+be matched on, which is the one failure this arrangement prevents.
+
+## Retrieval contract
+
+```bash
+curl -s localhost:8080/api/v1/search/excel -H 'content-type: application/json' -d '{
+  "query": "How is projected revenue calculated?",
+  "filters": {"workbook_ids": ["wb42"]},
+  "top_k": 10,
+  "include_structure": true,
+  "expand_references": true,
+  "reference_depth": 1,
+  "max_related_nodes": 20
+}' | jq
+```
+
+The response carries `hits` (scored chunks with `source.workbook_id`/`version`/`sheet`/`a1_range`),
+`nodes` (the exact structural payloads, keyed by node id), `unresolved_references` and
+`truncation` — what a bounded expansion dropped and why. It is **retrieval evidence, not a
+generated answer**.
+
+Optional direct-inspection endpoints: `GET /api/v1/excel/{workbook_id}/structure` and
+`POST /api/v1/excel/range` for callers that need deterministic structure without a semantic query.
+
+## Invariants
+
+- **No cross-version reads.** Ids are deterministic within `(workbook_id, version)`; a replacement
+  version is indexed before activation and older versions are garbage-collected.
+- **ACL filters apply to primary hits *and* to every related-node lookup.** `_mget` does not enforce
+  document-level ACLs, so the service does.
+- **Bounded expansion.** Depth, node count, payload bytes and wall-clock are all capped, and a
+  truncated expansion says so.
+- **No cell-per-document explosion.** Large grids are bounded range and row-group nodes; a workbook
+  that would exceed `max_documents_per_workbook` is refused, not silently clipped.
+- **Macros are never executed**, external links are never refreshed, formulas are never evaluated.
+- **A cached value is not a computed value** and is labelled as such wherever it is returned.
+
+## Quickstart
+
+```bash
+uv sync --extra dev
+uv run pytest                                  # runs against the in-memory Elasticsearch double
+uv run excel-rag index tests/fixtures/*.xlsx   # ingest
+uv run excel-rag serve
+```
+
+With a live cluster: `EXCEL_RAG_USE_LIVE_ELASTICSEARCH=true` plus
+`EXCEL_RAG_ELASTICSEARCH__URLS='["http://127.0.0.1:9200"]'`.
+
+## Phases
+
+1. **MVP ingestion and search** — parse without executing macros; index sheets, regions, chunks,
+   headers, A1 coordinates and cached values; stateless hybrid search with citations and filters.
+2. **Cross-reference retrieval** — formula precedents, named ranges, structural nodes, range
+   overlap queries, bounded expansion with cycle detection, explicit unresolved references.
+3. **Production hardening** — active-version switching, deterministic reindexing, stale-version
+   cleanup, per-request budgets, large-workbook benchmarks, and parsing hardened against zip bombs
+   and hostile sheet dimensions.
+
+## Non-goals
+
+Multi-turn orchestration, agent tool selection, answer generation, feedback-based relevance
+evaluation, executing spreadsheets, SQL analytics, recalculating Excel formulas, and any additional
+persistent store.

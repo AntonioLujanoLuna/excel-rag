@@ -27,3 +27,35 @@ jobs:
         run: uv run mypy src/excel_rag
       - name: Tests
         run: uv run pytest --cov=excel_rag --cov-report=term
+
+  live-elasticsearch:
+    # The in-memory double accepts any mapping and refreshes instantly; a real cluster does neither.
+    # This job runs tests/live against one, which is where a refused mapping, a rejected bulk item
+    # or an unrefreshed delete shows up.
+    runs-on: ubuntu-latest
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          xpack.ml.enabled: "false"
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -fsS http://localhost:9200/_cluster/health?wait_for_status=yellow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --extra dev --extra es
+      - name: Live tests
+        env:
+          EXCEL_RAG_TEST_ES_URL: http://127.0.0.1:9200
+        run: uv run pytest tests/live -rs

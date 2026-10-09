@@ -1,9 +1,9 @@
 """The live Elasticsearch adapter, and the production ``knn`` query builder.
 
-This is the path a real cluster runs; it is written so the production shape exists even though no
-cluster is reachable from the machine the rest of this repo was developed on. **The live path is
-UNMEASURED here** -- the benchmarks run against the in-memory double, and no number in this repo
-comes from an Elasticsearch cluster.
+This is the path a real cluster runs, used by both ingestion and the service. It is functionally
+tested against Elasticsearch 8.15 by ``tests/live`` (run in CI against a service container), but
+its **performance is unmeasured** -- the benchmarks run against the in-memory double, and no
+latency number in this repo comes from a cluster.
 
 ``elasticsearch`` is an optional extra, so the import is lazy: this module imports cleanly with the
 package absent, and only raises when a connection is actually attempted.
@@ -157,7 +157,11 @@ class LiveElasticsearch:
 
     def delete_by_query(self, index: str, query: Mapping[str, Any]) -> int:
         self.calls.append(("delete_by_query", index))
-        response = _as_mapping(self.client.delete_by_query(index=index, query=dict(query)))
+        # Refreshed like every write here: until the shard refreshes, search and count still see
+        # the deleted documents, so a garbage-collected version would linger visibly.
+        response = _as_mapping(
+            self.client.delete_by_query(index=index, query=dict(query), refresh=True)
+        )
         return int(response.get("deleted", 0))
 
     def count(self, index: str, query: Mapping[str, Any] | None = None) -> int:

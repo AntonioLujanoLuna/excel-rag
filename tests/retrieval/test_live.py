@@ -82,7 +82,8 @@ class _FakeReal:
     def count(self, *, index: str, query: Any = None) -> Any:
         return {"count": 7}
 
-    def delete_by_query(self, *, index: str, query: Any) -> Any:
+    def delete_by_query(self, *, index: str, query: Any, refresh: bool = False) -> Any:
+        self.last_delete_refresh = refresh
         return {"deleted": 2}
 
 
@@ -194,6 +195,11 @@ class TestSearch:
     def test_count_and_delete_by_query(self, live: LiveElasticsearch) -> None:
         assert live.count("i", {"match_all": {}}) == 7
         assert live.delete_by_query("i", {"match_all": {}}) == 2
+
+    def test_delete_by_query_refreshes(self, live: LiveElasticsearch, fake: _FakeReal) -> None:
+        """Unrefreshed, a cluster keeps counting and returning deleted documents."""
+        live.delete_by_query("i", {"match_all": {}})
+        assert fake.last_delete_refresh is True
 
     def test_calls_are_recorded(self, live: LiveElasticsearch) -> None:
         live.count("i")

@@ -200,9 +200,11 @@ Reading it honestly:
 
 ## What is not measured
 
-- **The live path is UNMEASURED.** No Elasticsearch cluster is reachable from the machine this was
-  built on. `live.py` is written and unit-tested against a stand-in client (`tests/retrieval/test_live.py`),
-  but no query in this repository has run against a real cluster, and no latency here comes from one.
+- **The live path is tested for behaviour, not measured for speed.** `tests/live` runs ingestion,
+  search, expansion, range, dependents, ACL filtering and version garbage collection against a real
+  Elasticsearch 8.15 (the `live-elasticsearch` CI job; locally, set `EXCEL_RAG_TEST_ES_URL`). Its
+  first run found what the in-memory double could not: `delete_by_query` without a refresh left a
+  replaced version visible to search and count. No latency number here comes from a cluster.
 - **Recall is not measured.** The in-memory double returns ordinal match counts and does not
   implement dense-vector search, so no precision/recall number is claimed for the fusion.
 - Real `knn` behaviour, index-time analysis, and production BM25 scoring are all cluster-side and

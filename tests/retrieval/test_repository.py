@@ -30,7 +30,8 @@ from conftest import (
 from excel_rag.es import INDEX_CHUNKS, INDEX_STRUCTURE, INDEX_VERSIONS
 from excel_rag.fake_es import InMemoryElasticsearch
 from excel_rag.models import ChunkType, SearchFilters
-from excel_rag.retrieval import Repository, Scope, UnknownWorkbook
+from excel_rag.retrieval import Repository, Scope, TooManyWorkbooks, UnknownWorkbook
+from excel_rag.retrieval import repository as repository_module
 from excel_rag.settings import Settings
 
 
@@ -73,6 +74,25 @@ class TestScope:
         settings = Settings(default_acl_scope=(FINANCE,))
         scope = Repository(client, settings).resolve_scope()
         assert scope.acl_scopes == (FINANCE,)
+
+    def test_the_version_pin_is_one_clause_however_many_workbooks(self) -> None:
+        scope = Scope(versions={f"wb{index}": 1 for index in range(500)})
+        (pin,) = scope.filters()
+        assert len(pin["terms"]["version_key"]) == 500
+
+    def test_an_unfiltered_scope_past_one_manifest_page_is_refused(
+        self, settings: Settings, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(repository_module, "MANIFEST_PAGE_SIZE", 1)
+        with pytest.raises(TooManyWorkbooks) as excinfo:
+            Repository(client, settings).resolve_scope()
+        assert (excinfo.value.count, excinfo.value.limit) == (2, 1)
+
+    def test_a_full_last_page_is_not_refused(
+        self, settings: Settings, client, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(repository_module, "MANIFEST_PAGE_SIZE", 2)
+        assert Repository(client, settings).resolve_scope().versions == {WB: 1, OTHER_WB: 1}
 
     def test_visible_rejects_wrong_scope_and_wrong_version(self) -> None:
         scope = Scope(acl_scopes=(FINANCE,), versions={WB: 1})

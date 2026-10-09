@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from .expansion import ExpansionResult, expand, node_payload
 from .fusion import Candidate, RankedCandidate, cosine_similarity, rank
-from .repository import NodeFetch, Repository, Scope, UnknownWorkbook
+from .repository import NodeFetch, Repository, Scope, TooManyWorkbooks, UnknownWorkbook
 from .service import RetrievalService
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "Repository",
     "RetrievalService",
     "Scope",
+    "TooManyWorkbooks",
     "UnknownWorkbook",
     "cosine_similarity",
     "expand",

@@ -94,10 +94,19 @@ class TestCycles:
 class TestBudgets:
     def test_node_budget_truncates_and_counts(self, settings: Settings, client) -> None:
         result = _expand(Repository(client, settings), [N_REGION], max_depth=2, max_nodes=2)
-        assert len(result.nodes) == 2
+        assert N_REGION in result.nodes
+        assert len(result.nodes) == 1 + 2, "the seed plus two related nodes"
         assert result.truncation.truncated
         assert "max_related_nodes" in (result.truncation.reason or "")
         assert result.truncation.dropped_nodes >= 1
+
+    def test_the_node_budget_never_drops_a_seed(self, settings: Settings, client) -> None:
+        """Seeds are the hits' own nodes: a zero related-node budget still returns them."""
+        result = _expand(
+            Repository(client, settings), [N_REGION, N_FORMULA2], max_depth=1, max_nodes=0
+        )
+        assert set(result.nodes) == {N_REGION, N_FORMULA2}
+        assert "max_related_nodes" in (result.truncation.reason or "")
 
     def test_byte_budget_truncates_and_counts(self, settings: Settings, client) -> None:
         result = _expand(Repository(client, settings), [N_REGION], max_depth=0, max_bytes=10)

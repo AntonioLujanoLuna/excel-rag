@@ -9,20 +9,21 @@ dependency rather than by rebuilding the app.
 
 from __future__ import annotations
 
-from typing import Any
+from weakref import WeakSet
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__
 from .api import health, search, structure
 from .api.schemas import error_body
 from .es import ElasticsearchLike
 from .fake_es import in_memory_client
-from .retrieval import UnknownWorkbook
+from .retrieval import TooManyWorkbooks, UnknownWorkbook
 from .settings import Settings
 
 #: Transport-level ceiling on a request body. This is an HTTP guard, not a retrieval budget -- the
@@ -52,6 +53,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
     app.state.client = create_client(resolved)
+    #: Clients whose indices are known to exist, so a request does not re-check them.
+    app.state.ensured_clients = WeakSet()
 
     app.include_router(health.router)
     app.include_router(search.router)
@@ -63,22 +66,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def _install_size_guard(app: FastAPI) -> None:
-    @app.middleware("http")
-    async def _limit_body(request: Request, call_next: Any) -> Any:
-        content_length = request.headers.get("content-length")
-        if (
-            content_length is not None
-            and content_length.isdigit()
-            and int(content_length) > MAX_REQUEST_BYTES
-        ):
-            return JSONResponse(
-                status_code=413,
-                content=error_body(
-                    "request_too_large",
-                    f"request body exceeds {MAX_REQUEST_BYTES} bytes",
-                ),
-            )
-        return await call_next(request)
+    app.add_middleware(BodySizeLimit, limit=MAX_REQUEST_BYTES)
+
+
+def _too_large(limit: int) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail={"type": "request_too_large", "message": f"request body exceeds {limit} bytes"},
+    )
+
+
+class BodySizeLimit:
+    """Refuse a request body over ``limit`` bytes, whether or not it declares its length.
+
+    A declared ``Content-Length`` over the limit is refused before the body is read. A chunked
+    body declares nothing, so the bytes are counted as the app reads them and the read fails with a
+    413 once the count passes the limit -- FastAPI re-raises an ``HTTPException`` from a body read,
+    so the refusal reaches the standard error envelope instead of becoming a generic 400.
+    """
+
+    def __init__(self, app: ASGIApp, limit: int) -> None:
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers", ()):
+            if name == b"content-length" and value.isdigit() and int(value) > self.limit:
+                response = JSONResponse(
+                    status_code=413,
+                    content=error_body(
+                        "request_too_large", f"request body exceeds {self.limit} bytes"
+                    ),
+                )
+                await response(scope, receive, send)
+                return
+
+        received = 0
+
+        async def counted_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.limit:
+                    raise _too_large(self.limit)
+            return message
+
+        await self.app(scope, counted_receive, send)
 
 
 def _register_handlers(app: FastAPI) -> None:
@@ -104,6 +141,17 @@ def _register_handlers(app: FastAPI) -> None:
             ),
         )
 
+    @app.exception_handler(TooManyWorkbooks)
+    async def _too_many_workbooks(request: Request, exc: TooManyWorkbooks) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content=error_body(
+                "workbook_filter_required",
+                f"{exc.count} workbooks are active, more than an unfiltered search pins "
+                f"({exc.limit}); filter by workbook_ids",
+            ),
+        )
+
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         raw: object = exc.detail
@@ -121,4 +169,4 @@ def _register_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
 
 
-__all__ = ["MAX_REQUEST_BYTES", "create_app", "create_client"]
+__all__ = ["MAX_REQUEST_BYTES", "BodySizeLimit", "create_app", "create_client"]

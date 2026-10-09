@@ -18,13 +18,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..es import ACL_FIELD, ElasticsearchLike, index_mappings
-from ..models import A1Range, ChunkDocument, SearchFilters, StructureDocument
+from ..es import ACL_FIELD, VERSION_KEY_FIELD, ElasticsearchLike, index_mappings
+from ..models import A1Range, ChunkDocument, SearchFilters, StructureDocument, version_key
 from ..settings import Settings
 
-#: How many active-version manifest rows a single unfiltered scope resolution reads. A deployment
-#: has one row per workbook; this is an operational ceiling, not a per-request user bound.
-MANIFEST_PAGE_SIZE = 1000
+#: How many active-version manifest rows a single unfiltered scope resolution reads: Elasticsearch's
+#: default ``index.max_result_window``. A deployment has one row per workbook; past this many, an
+#: unfiltered search is refused (:class:`TooManyWorkbooks`) rather than silently dropping workbooks.
+MANIFEST_PAGE_SIZE = 10_000
 
 
 class UnknownWorkbook(LookupError):
@@ -33,6 +34,15 @@ class UnknownWorkbook(LookupError):
     def __init__(self, workbook_id: str) -> None:
         super().__init__(workbook_id)
         self.workbook_id = workbook_id
+
+
+class TooManyWorkbooks(LookupError):
+    """An unfiltered search would pin more workbooks than one manifest read returns."""
+
+    def __init__(self, count: int, limit: int) -> None:
+        super().__init__(count, limit)
+        self.count = count
+        self.limit = limit
 
 
 @dataclass(frozen=True)
@@ -53,18 +63,12 @@ class Scope:
         if self.acl_scopes:
             clauses.append({"terms": {ACL_FIELD: list(self.acl_scopes)}})
         if self.versions:
-            should = [
-                {
-                    "bool": {
-                        "filter": [
-                            {"term": {"workbook_id": workbook_id}},
-                            {"term": {"version": version}},
-                        ]
-                    }
-                }
+            # One clause however many workbooks: every document carries `workbook_id:vN`.
+            keys = [
+                version_key(workbook_id, version)
                 for workbook_id, version in sorted(self.versions.items())
             ]
-            clauses.append({"bool": {"should": should, "minimum_should_match": 1}})
+            clauses.append({"terms": {VERSION_KEY_FIELD: keys}})
         return clauses
 
     def visible(self, document: Mapping[str, Any]) -> bool:
@@ -179,6 +183,11 @@ class Repository:
             query = {"match_all": {}}
             size = MANIFEST_PAGE_SIZE
         result = self._client.search(self.versions_index, query, size=size)
+        if not workbook_ids and len(_hits(result)) >= size:
+            # A full page may be a truncated one; checking costs a call only at the boundary.
+            total = self._client.count(self.versions_index)
+            if total > size:
+                raise TooManyWorkbooks(total, size)
         versions: dict[str, int] = {}
         for hit in _hits(result):
             source = _source(hit)
@@ -341,4 +350,11 @@ def _source(hit: Mapping[str, Any]) -> Mapping[str, Any]:
     return source
 
 
-__all__ = ["MANIFEST_PAGE_SIZE", "NodeFetch", "Repository", "Scope", "UnknownWorkbook"]
+__all__ = [
+    "MANIFEST_PAGE_SIZE",
+    "NodeFetch",
+    "Repository",
+    "Scope",
+    "TooManyWorkbooks",
+    "UnknownWorkbook",
+]

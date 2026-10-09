@@ -56,6 +56,8 @@ def expand(
     """Expand the reference graph from ``seed_node_ids`` under the request budgets.
 
     ``max_depth`` is the number of reference hops to follow; ``0`` returns the seed nodes only.
+    ``max_nodes`` bounds the related nodes added past the seeds; the seeds themselves are bounded
+    by the request's ``top_k`` and only by ``max_bytes`` here.
     ``deadline`` is an absolute :func:`time.monotonic` instant, checked between levels.
     """
     nodes: dict[str, NodePayload] = {}
@@ -65,6 +67,7 @@ def expand(
     dropped = 0
     denied = 0
     bytes_used = 0
+    related = 0
     depth_limit: int | None = None
 
     seeds = list(dict.fromkeys(seed_node_ids))
@@ -98,7 +101,9 @@ def expand(
 
         budget_hit = False
         for document in fetch.nodes:
-            if len(nodes) >= max_nodes:
+            # The seeds are the hits' own nodes, bounded by `top_k`; the node budget is for the
+            # *related* nodes an expansion adds, so only levels past the seeds spend it.
+            if level > 0 and related >= max_nodes:
                 reasons.append("max_related_nodes")
                 dropped += 1
                 budget_hit = True
@@ -112,6 +117,8 @@ def expand(
                 continue
             nodes[document.node_id] = payload
             bytes_used += size
+            if level > 0:
+                related += 1
             for unresolved_reference in document.unresolved_references:
                 note_unresolved(unresolved_reference)
         if budget_hit:

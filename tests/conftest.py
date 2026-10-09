@@ -8,6 +8,7 @@ a related node one scope may read and another may not, a dangling reference and 
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -33,6 +34,10 @@ from excel_rag.models import (
     node_id,
 )
 from excel_rag.settings import Settings
+
+# The suite runs without model weights: tests that exercise vectors pass a hashing embedder, or
+# opt in to the real model in tests/live. Every `Settings()` is built at test time, after this.
+os.environ.setdefault("EXCEL_RAG_EMBEDDING__PROVIDER", "none")
 
 FINANCE = "finance-team"
 HR = "hr-team"

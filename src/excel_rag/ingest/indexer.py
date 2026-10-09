@@ -11,17 +11,20 @@ version replacement all live here. Two invariants from the README shape it:
   reader that consults the manifest therefore never sees a half-built version, and ids never cross
   versions.
 
-Embedding fields are left empty: producing vectors is the retrieval workstream's pipeline, not this
-one's.
+Each chunk is embedded with the configured model (``lightonai/mDenseOn`` by default, see
+:mod:`excel_rag.embedding`) before the bulk write, and records that model in ``embedding_model``.
+Structure documents carry no vector: they are exact payloads, reached through a chunk.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from ..embedding import Embedder, build_embedder, chunk_text
 from ..es import INGEST_RUN_FIELD, ElasticsearchLike, index_mappings
 from ..models import ActiveVersionManifest, ChunkDocument, StructureDocument
 from ..settings import Settings
@@ -30,6 +33,13 @@ from .documents import IngestedWorkbook
 from .errors import IngestError
 
 _EMPTY_EMBEDDING_FIELDS = ("embedding", "embedding_model", "colbert")
+
+
+class _FromSettings:
+    """Sentinel: build the embedder the settings configure."""
+
+
+_FROM_SETTINGS = _FromSettings()
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +53,8 @@ class IndexResult:
     documents_total: int
     replaced_version: int | None
     deleted_documents: int
+    #: The model whose vectors the chunks carry, or ``None`` when they were indexed without.
+    embedding_model: str | None = None
 
 
 def document_body(
@@ -61,9 +73,19 @@ def document_body(
 class Indexer:
     """Indexes ingested workbooks against the narrow :class:`ElasticsearchLike` protocol."""
 
-    def __init__(self, client: ElasticsearchLike, settings: Settings) -> None:
+    def __init__(
+        self,
+        client: ElasticsearchLike,
+        settings: Settings,
+        embedder: Embedder | _FromSettings | None = _FROM_SETTINGS,
+    ) -> None:
+        """``embedder`` defaults to the one the settings configure; pass ``None`` to index chunks
+        without vectors, or an embedder of your own (tests pass a hashing double)."""
         self.client = client
         self.settings = settings
+        self.embedder: Embedder | None = (
+            build_embedder(settings.embedding) if isinstance(embedder, _FromSettings) else embedder
+        )
 
     def _name(self, base: str) -> str:
         return self.settings.elasticsearch.index_name(base)
@@ -102,7 +124,8 @@ class Indexer:
             previous = int(existing["active_version"])
 
         run = uuid4().hex
-        chunks = [(chunk.id, document_body(chunk, run)) for chunk in ingested.chunks]
+        embedded = self._embedded(ingested.chunks)
+        chunks = [(chunk.id, document_body(chunk, run)) for chunk in embedded]
         structure = [(node.node_id, document_body(node, run)) for node in ingested.structure]
         self.client.bulk_index(chunks_index, chunks, refresh=True)
         self.client.bulk_index(structure_index, structure, refresh=True)
@@ -135,7 +158,35 @@ class Indexer:
             documents_total=total,
             replaced_version=replaced_version,
             deleted_documents=deleted,
+            embedding_model=self.embedder.model_name if self.embedder is not None else None,
         )
+
+    def _embedded(self, chunks: Sequence[ChunkDocument]) -> list[ChunkDocument]:
+        """Fill each chunk's vector and the model that produced it, before anything is written.
+
+        Embedding happens before the bulk write so a model failure leaves the index untouched: a
+        workbook is indexed with vectors or not at all, never half and half.
+        """
+        if self.embedder is None or not chunks:
+            return list(chunks)
+        vectors = self.embedder.embed_documents(
+            [chunk_text(chunk.title, chunk.content) for chunk in chunks]
+        )
+        if len(vectors) != len(chunks):
+            raise IngestError(
+                f"embedder returned {len(vectors)} vectors for {len(chunks)} chunks; refusing"
+            )
+        dims = self.settings.embedding.dims
+        model = self.embedder.model_name
+        filled: list[ChunkDocument] = []
+        for chunk, vector in zip(chunks, vectors, strict=True):
+            if len(vector) != dims:
+                raise IngestError(
+                    f"{model!r} produced a {len(vector)}-dimensional vector; the index is "
+                    f"configured for {dims}"
+                )
+            filled.append(chunk.model_copy(update={"embedding": vector, "embedding_model": model}))
+        return filled
 
     def _delete_version(self, index: str, workbook_id: str, version: int) -> int:
         query = {

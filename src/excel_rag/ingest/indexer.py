@@ -7,8 +7,9 @@ version replacement all live here. Two invariants from the README shape it:
   ``budgets.max_documents_per_workbook`` documents is *refused*, never silently clipped.
 * **Index before activate, then garbage-collect.** A replacement version's documents are written
   first, then the manifest flips to the new version, and only then are the previous version's
-  documents removed by query. A reader that consults the manifest therefore never sees a half-built
-  version, and ids never cross versions.
+  documents -- and any document of this version an earlier run wrote -- removed by query. A
+  reader that consults the manifest therefore never sees a half-built version, and ids never cross
+  versions.
 
 Embedding fields are left empty: producing vectors is the retrieval workstream's pipeline, not this
 one's.
@@ -19,8 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
-from ..es import ElasticsearchLike, index_mappings
+from ..es import INGEST_RUN_FIELD, ElasticsearchLike, index_mappings
 from ..models import ActiveVersionManifest, ChunkDocument, StructureDocument
 from ..settings import Settings
 from .canonical import WorkbookModel
@@ -43,9 +45,13 @@ class IndexResult:
     deleted_documents: int
 
 
-def document_body(document: ChunkDocument | StructureDocument) -> dict[str, Any]:
-    """Serialise a document, dropping embedding fields that are still empty."""
+def document_body(
+    document: ChunkDocument | StructureDocument, ingest_run: str | None = None
+) -> dict[str, Any]:
+    """Serialise a document stamped with its indexing run, dropping still-empty embedding fields."""
     body: dict[str, Any] = document.model_dump(mode="json")
+    if ingest_run is not None:
+        body[INGEST_RUN_FIELD] = ingest_run
     for field in _EMPTY_EMBEDDING_FIELDS:
         if body.get(field) is None:
             body.pop(field, None)
@@ -95,8 +101,9 @@ class Indexer:
         if existing is not None and existing.get("active_version") is not None:
             previous = int(existing["active_version"])
 
-        chunks = [(chunk.id, document_body(chunk)) for chunk in ingested.chunks]
-        structure = [(node.node_id, document_body(node)) for node in ingested.structure]
+        run = uuid4().hex
+        chunks = [(chunk.id, document_body(chunk, run)) for chunk in ingested.chunks]
+        structure = [(node.node_id, document_body(node, run)) for node in ingested.structure]
         self.client.bulk_index(chunks_index, chunks, refresh=True)
         self.client.bulk_index(structure_index, structure, refresh=True)
 
@@ -109,7 +116,11 @@ class Indexer:
             versions_index, model.workbook_id, manifest.model_dump(mode="json"), refresh=True
         )
 
-        deleted = 0
+        # A re-index of the same version overwrote every id this run produced, but an id an earlier
+        # run produced and this one did not (a region that no longer exists) would linger forever
+        # under the active version. Anything of this version not written by this run is stale.
+        deleted = self._delete_other_runs(chunks_index, model.workbook_id, model.version, run)
+        deleted += self._delete_other_runs(structure_index, model.workbook_id, model.version, run)
         replaced_version: int | None = None
         if replace and previous is not None and previous != model.version:
             replaced_version = previous
@@ -133,6 +144,18 @@ class Indexer:
                     {"term": {"workbook_id": workbook_id}},
                     {"term": {"version": version}},
                 ]
+            }
+        }
+        return self.client.delete_by_query(index, query)
+
+    def _delete_other_runs(self, index: str, workbook_id: str, version: int, run: str) -> int:
+        query = {
+            "bool": {
+                "filter": [
+                    {"term": {"workbook_id": workbook_id}},
+                    {"term": {"version": version}},
+                ],
+                "must_not": [{"term": {INGEST_RUN_FIELD: run}}],
             }
         }
         return self.client.delete_by_query(index, query)

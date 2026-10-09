@@ -73,6 +73,36 @@ def test_version_replacement_leaves_only_the_new_version(build) -> None:
     assert client.count(INDEX_STRUCTURE, {"term": {"version": 1}}) == 0
 
 
+def test_reindexing_the_active_version_leaves_no_stale_documents(build) -> None:
+    """Same version, different content: documents only the earlier run wrote are removed."""
+    client, indexer = _indexer()
+    first = ingest_workbook(build.path("cross_sheet_formula"), workbook_id="wb", version=1)
+    indexer.index_workbook(first)
+    second = ingest_workbook(build.path("two_tables_one_sheet"), workbook_id="wb", version=1)
+    result = indexer.index_workbook(second)
+
+    assert client.count(INDEX_CHUNKS) == len(second.chunks)
+    assert client.count(INDEX_STRUCTURE) == len(second.structure)
+    assert result.replaced_version is None
+    assert result.deleted_documents > 0
+
+
+def test_reindexing_identical_content_deletes_nothing(build) -> None:
+    client, indexer = _indexer()
+    ingested = ingest_workbook(build.path("cross_sheet_formula"), workbook_id="wb", version=1)
+    indexer.index_workbook(ingested)
+    result = indexer.index_workbook(ingested)
+    assert result.deleted_documents == 0
+    assert client.count(INDEX_CHUNKS) == len(ingested.chunks)
+
+
+def test_every_document_carries_its_run_and_version_key(build) -> None:
+    ingested = ingest_workbook(build.path("two_tables_one_sheet"), workbook_id="wb", version=3)
+    body = document_body(ingested.structure[0], "run-1")
+    assert body["ingest_run"] == "run-1"
+    assert body["version_key"] == "wb:v3"
+
+
 def test_budget_refusal(build) -> None:
     from fixtures import make_fixtures as mk
 

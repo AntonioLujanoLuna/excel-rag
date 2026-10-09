@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from excel_rag.ingest.formulas import (
+from excel_rag.models import A1Range, ReferenceKind, UnresolvedReason
+from excel_rag.workbook.formulas import (
     FormulaContext,
     NamedRangeInfo,
     TableInfo,
     parse_formula,
 )
-from excel_rag.models import A1Range, ReferenceKind, UnresolvedReason
 
 
 def _context(**overrides) -> FormulaContext:

@@ -7,10 +7,10 @@ from fixtures import make_fixtures as mk
 from excel_rag.es import INDEX_CHUNKS, INDEX_STRUCTURE
 from excel_rag.fake_es import in_memory_client
 from excel_rag.ingest import ingest_workbook, read_workbook
-from excel_rag.ingest.canonical import RegionKind
 from excel_rag.ingest.indexer import Indexer
 from excel_rag.models import NodeType, UnresolvedReason
 from excel_rag.settings import Settings
+from excel_rag.workbook.canonical import RegionKind
 
 
 def test_two_independent_tables_on_one_sheet(build) -> None:

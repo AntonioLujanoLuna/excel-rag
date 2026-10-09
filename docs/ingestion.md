@@ -4,17 +4,19 @@ How an `.xlsx`/`.xlsm` becomes `excel_chunks` and `excel_structure` documents. T
 representation lives **only in memory**; Elasticsearch is the durable copy, so everything here is
 about reading once, deciding what is searchable and what is exact, and failing explicitly.
 
-Code lives in `src/excel_rag/ingest/`:
+Reading and modelling live in `src/excel_rag/workbook/`, shared with the context renderer
+(`src/excel_rag/context/`, which renders an attached workbook for a conversation without indexing
+it); turning the model into documents lives in `src/excel_rag/ingest/`:
 
 | module | responsibility |
 |---|---|
-| `reader.py` | openpyxl loading with the macros/dimension/zip guards |
-| `regions.py` | split a sheet into title / table / notes regions |
-| `formulas.py` | formula text → typed edges and explicit gaps |
-| `build.py` | assemble the canonical `WorkbookModel`, group formula clusters |
-| `documents.py` | canonical model → `ChunkDocument` / `StructureDocument` |
-| `indexer.py` | index creation, bulk write, budget refusal, version flip |
-| `cli.py` | `index`, `inspect`, `serve` |
+| `workbook/reader.py` | openpyxl loading (from a path or bytes) with the macros/dimension/zip guards |
+| `workbook/regions.py` | split a sheet into title / table / notes regions |
+| `workbook/formulas.py` | formula text → typed edges and explicit gaps |
+| `workbook/build.py` | assemble the canonical `WorkbookModel`, group formula clusters |
+| `ingest/documents.py` | canonical model → `ChunkDocument` / `StructureDocument` |
+| `ingest/indexer.py` | embedding, index creation, bulk write, budget refusal, version flip |
+| `cli.py` | `index`, `inspect`, `render`, `serve` |
 
 ## Decisions and why
 

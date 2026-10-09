@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from excel_rag.ingest.canonical import (
+from excel_rag.workbook.canonical import (
     cell_node_id,
     chunk_id,
     column_letter,

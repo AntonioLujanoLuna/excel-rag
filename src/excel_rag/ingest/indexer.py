@@ -28,9 +28,9 @@ from ..embedding import Embedder, build_embedder, chunk_text
 from ..es import INGEST_RUN_FIELD, ElasticsearchLike, index_mappings
 from ..models import ActiveVersionManifest, ChunkDocument, StructureDocument
 from ..settings import Settings
-from .canonical import WorkbookModel
+from ..workbook.canonical import WorkbookModel
+from ..workbook.errors import IngestError
 from .documents import IngestedWorkbook
-from .errors import IngestError
 
 _EMPTY_EMBEDDING_FIELDS = ("embedding", "embedding_model", "colbert")
 

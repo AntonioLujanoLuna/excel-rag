@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 from excel_rag.ingest import ingest_workbook
-from excel_rag.ingest.build import normalize_formula
-from excel_rag.ingest.canonical import workbook_node_id
 from excel_rag.models import ChunkType, NodeType
+from excel_rag.workbook.build import normalize_formula
+from excel_rag.workbook.canonical import workbook_node_id
 
 
 def test_workbook_and_sheet_summaries_exist(build) -> None:

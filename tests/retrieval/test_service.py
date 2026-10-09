@@ -18,6 +18,7 @@ from conftest import (
     N_REGION,
     N_SECRET,
     WB,
+    build_seed,
 )
 
 from excel_rag.models import SearchFilters, SearchRequest
@@ -83,6 +84,17 @@ class TestSearch:
         )
         assert C_STALE not in {hit.chunk_id for hit in response.hits}
         assert {hit.source.version for hit in response.hits} == {1}
+
+    def test_chunks_of_a_never_activated_version_are_invisible(
+        self, settings: Settings, empty_client
+    ) -> None:
+        """No manifest row means nothing is active: a first ingestion still in flight is unread."""
+        seed = build_seed()
+        empty_client.bulk_index(settings.elasticsearch.chunks_index, seed.chunks, refresh=True)
+        response = _service(settings, empty_client).search(
+            SearchRequest(query="revenue", include_structure=False)
+        )
+        assert response.hits == ()
 
     def test_an_unknown_workbook_filter_is_refused(self, settings: Settings, client) -> None:
         with pytest.raises(UnknownWorkbook):

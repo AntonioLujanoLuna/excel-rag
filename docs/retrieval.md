@@ -200,14 +200,15 @@ Reading it honestly:
 - Real `knn` behaviour, index-time analysis, and production BM25 scoring are all cluster-side and
   unmeasured here.
 
-## Request validation: a misplaced field is a 422, not a no-op
+## Request validation: a misplaced field is a 400, not a no-op
 
 The request models (`SearchRequest`, `SearchFilters`, `StructureQuery`, `RangeQuery`) are declared
 `extra="forbid"`. Before that, a caller that put `expand_references` or `reference_depth` inside
 `filters` instead of at the top level received **200 with no expansion and no warning** — which reads
 exactly like a broken traversal, and cost a debugging round here: the first version of the seam test
 reported "no reference was followed" when the request was what was wrong. A request field in the
-wrong place fails loudly now.
+wrong place fails loudly now: the app turns the validation error into a 400 with the standard
+error envelope (`validation_error`), not a bare 422.
 
 ## The seam is tested
 

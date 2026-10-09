@@ -36,13 +36,13 @@ _EXTERNAL_RE = re.compile(
 _FUNC_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_.]*)\s*\(")
 _TABLE_REF_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z0-9_]*)\s*\[([^\]]*)\]")
 _COL_RE = re.compile(
-    r"(?:(?:'(?P<qsheet>[^']+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
+    r"(?:(?:'(?P<qsheet>(?:[^']|'')+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
     r"(?<![A-Za-z0-9_$])\$?(?P<start>[A-Za-z]{1,3}):\$?(?P<end>[A-Za-z]{1,3})(?![A-Za-z0-9_])"
 )
 _CELL_RE = re.compile(
-    r"(?:(?:'(?P<qsheet>[^']+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
+    r"(?:(?:'(?P<qsheet>(?:[^']|'')+)'|(?P<sheet>[A-Za-z_][A-Za-z0-9_.]*))!)?"
     r"(?<![A-Za-z0-9_$])(?P<start>\$?[A-Za-z]{1,3}\$?\d{1,7})"
-    r"(?::(?P<end>\$?[A-Za-z]{1,3}\$?\d{1,7}))?(?![A-Za-z0-9_])"
+    r"(?::(?P<end>\$?[A-Za-z]{1,3}\$?\d{1,7}))?(?![A-Za-z0-9_]|\s*\()"
 )
 _IDENT_RE = re.compile(r"(?<![A-Za-z0-9_.$])(?P<name>[A-Za-z_][A-Za-z0-9_.]*)(?![A-Za-z0-9_(])")
 _SPILL_RE = re.compile(r"(?:[)\]]|\d)\s*#")
@@ -233,6 +233,14 @@ def _last_bracket_token(spec: str) -> str:
     return flat[-1] if flat else ""
 
 
+def _explicit_sheet(match: re.Match[str]) -> str | None:
+    """The sheet a reference names, with a quoted name's doubled ``''`` unescaped."""
+    quoted = match.group("qsheet")
+    if quoted is not None:
+        return quoted.replace("''", "'")
+    return match.group("sheet")
+
+
 def _resolve_sheet(
     explicit: str | None,
     context: FormulaContext,
@@ -364,9 +372,7 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
     for match in _COL_RE.finditer(col_clean):
         col_spans.append(match.span())
         reference_text = match.group(0)
-        sheet = _resolve_sheet(
-            match.group("qsheet") or match.group("sheet"), context, unresolved, reference_text
-        )
+        sheet = _resolve_sheet(_explicit_sheet(match), context, unresolved, reference_text)
         if sheet is None:
             continue
         start_col = A1Range.parse(sheet, f"{match.group('start')}1")
@@ -391,7 +397,7 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
     for match in _CELL_RE.finditer(cell_clean):
         cell_spans.append(match.span())
         reference_text = match.group(0)
-        explicit = match.group("qsheet") or match.group("sheet")
+        explicit = _explicit_sheet(match)
         sheet = _resolve_sheet(explicit, context, unresolved, reference_text)
         if sheet is None:
             continue

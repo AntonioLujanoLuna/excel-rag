@@ -106,12 +106,22 @@ Optional direct-inspection endpoints: `GET /api/v1/excel/{workbook_id}/structure
 ```bash
 uv sync --extra dev
 uv run pytest                                  # runs against the in-memory Elasticsearch double
-uv run excel-rag index tests/fixtures/*.xlsx   # ingest
-uv run excel-rag serve
+uv run excel-rag inspect path/to/book.xlsx     # print the regions, tables and counts ingestion detects
 ```
 
-With a live cluster: `EXCEL_RAG_USE_LIVE_ELASTICSEARCH=true` plus
-`EXCEL_RAG_ELASTICSEARCH__URLS='["http://127.0.0.1:9200"]'`.
+No `.xlsx` is committed: the test workbooks are generated at test time by
+`tests/fixtures/make_fixtures.py`.
+
+`index` and `serve` are separate processes, and the in-memory double lives only as long as one of
+them, so indexing and then serving needs a live cluster:
+
+```bash
+uv sync --extra dev --extra es
+export EXCEL_RAG_USE_LIVE_ELASTICSEARCH=true
+export EXCEL_RAG_ELASTICSEARCH__URLS='["http://127.0.0.1:9200"]'
+uv run excel-rag index path/to/book.xlsx --workbook-id wb42 --version 1
+uv run excel-rag serve
+```
 
 ## Phases
 

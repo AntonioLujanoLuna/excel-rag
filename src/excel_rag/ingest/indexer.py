@@ -16,7 +16,6 @@ one's.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -145,90 +144,20 @@ class Indexer:
         return int(stored["active_version"])
 
 
-class _LiveElasticsearch:
-    """A thin adapter from the real ``elasticsearch`` client to the narrow protocol.
-
-    The protocol uses ``indices_exists``/``create_index`` and flat arguments; the real client uses
-    ``indices.exists``/``indices.create`` and kwargs. Imported lazily so the package installs and
-    tests without the ``es`` extra.
-    """
-
-    def __init__(self, client: Any) -> None:  # pragma: no cover - needs the es extra
-        self._client = client
-
-    def indices_exists(self, index: str) -> bool:  # pragma: no cover - needs the es extra
-        return bool(self._client.indices.exists(index=index))
-
-    def create_index(self, index: str, mappings: Mapping[str, Any]) -> None:  # pragma: no cover
-        self._client.indices.create(index=index, mappings=mappings)
-
-    def delete_index(self, index: str) -> None:  # pragma: no cover - needs the es extra
-        self._client.indices.delete(index=index)
-
-    def index_document(
-        self, index: str, document_id: str, document: Mapping[str, Any], *, refresh: bool = False
-    ) -> None:  # pragma: no cover - needs the es extra
-        self._client.index(index=index, id=document_id, document=dict(document), refresh=refresh)
-
-    def bulk_index(
-        self,
-        index: str,
-        documents: Any,
-        *,
-        refresh: bool = False,
-    ) -> int:  # pragma: no cover - needs the es extra
-        operations: list[dict[str, Any]] = []
-        written = 0
-        for document_id, document in documents:
-            operations.append({"index": {"_index": index, "_id": document_id}})
-            operations.append(dict(document))
-            written += 1
-        if operations:
-            self._client.bulk(operations=operations, refresh=refresh)
-        return written
-
-    def get_document(
-        self, index: str, document_id: str
-    ) -> Mapping[str, Any] | None:  # pragma: no cover
-        if not self._client.exists(index=index, id=document_id):
-            return None
-        result: Mapping[str, Any] = self._client.get(index=index, id=document_id)["_source"]
-        return result
-
-    def mget_documents(self, index: str, document_ids: Any) -> Any:  # pragma: no cover
-        response = self._client.mget(index=index, ids=list(document_ids))
-        return [doc["_source"] for doc in response["docs"] if doc.get("found")]
-
-    def search(
-        self, index: str, query: Mapping[str, Any], **kwargs: Any
-    ) -> Any:  # pragma: no cover
-        return self._client.search(index=index, query=query, **kwargs)
-
-    def delete_by_query(self, index: str, query: Mapping[str, Any]) -> int:  # pragma: no cover
-        return int(self._client.delete_by_query(index=index, query=query)["deleted"])
-
-    def count(self, index: str, query: Mapping[str, Any] | None = None) -> int:  # pragma: no cover
-        return int(self._client.count(index=index, query=query)["count"])
-
-
 def build_client(settings: Settings) -> ElasticsearchLike:
-    """The in-memory double for local runs, the real client (wrapped) when configured."""
+    """The in-memory double for local runs, the live adapter when configured.
+
+    Ingestion and the service share one live adapter (:class:`~excel_rag.live.LiveElasticsearch`):
+    its bulk path goes through ``elasticsearch.helpers.bulk``, which chunks a large workbook and
+    raises on any rejected document instead of reporting it as written.
+    """
     if not settings.use_live_elasticsearch:
         from ..fake_es import in_memory_client
 
         return in_memory_client(settings)
-    from elasticsearch import Elasticsearch  # type: ignore[import-not-found]  # pragma: no cover
+    from ..live import LiveElasticsearch
 
-    credentials = settings.elasticsearch
-    auth: tuple[str, str] | None = None
-    if credentials.username and credentials.password is not None:
-        auth = (credentials.username, credentials.password.get_secret_value())
-    client = Elasticsearch(
-        list(credentials.urls),
-        request_timeout=credentials.request_timeout_seconds,
-        basic_auth=auth,
-    )
-    return _LiveElasticsearch(client)  # pragma: no cover - needs the es extra
+    return LiveElasticsearch(settings.elasticsearch)
 
 
 __all__ = ["IndexResult", "Indexer", "build_client", "document_body"]

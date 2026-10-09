@@ -203,7 +203,13 @@ class Repository:
         The match clauses are ``should`` (a chunk need only match one field), the ACL and version
         pins are ``filter`` (they must hold and do not contribute to the score), and the facet
         filters are ``filter`` too.
+
+        A scope with no active versions has nothing to pin, so it returns nothing: without a
+        manifest row every chunk in the index belongs to a version that was never activated (a
+        first ingestion still in flight), and an absent pin would otherwise read all of them.
         """
+        if not scope.versions:
+            return []
         body: dict[str, Any] = {}
         should: list[dict[str, Any]] = []
         if query.strip():

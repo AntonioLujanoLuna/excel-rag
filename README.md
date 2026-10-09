@@ -94,6 +94,9 @@ Optional direct-inspection endpoints: `GET /api/v1/excel/{workbook_id}/structure
   version is indexed before activation and older versions are garbage-collected.
 - **ACL filters apply to primary hits *and* to every related-node lookup.** `_mget` does not enforce
   document-level ACLs, so the service does.
+- **ACL scopes come from the caller's token, not the request body.** A configured principal is
+  filtered by the scopes it holds; `filters.acl_scopes` may narrow them, and naming one it does not
+  hold is a 403. The same applies to the direct-inspection routes.
 - **Bounded expansion.** Depth, node count, payload bytes and wall-clock are all capped, and a
   truncated expansion says so.
 - **No cell-per-document explosion.** Large grids are bounded range and row-group nodes; a workbook
@@ -122,6 +125,18 @@ export EXCEL_RAG_ELASTICSEARCH__URLS='["http://127.0.0.1:9200"]'
 uv run excel-rag index path/to/book.xlsx --workbook-id wb42 --version 1
 uv run excel-rag serve
 ```
+
+Callers and the scopes they hold (any configured token makes `/api/v1` require one):
+
+```bash
+export EXCEL_RAG_SERVER__PRINCIPALS='[
+  {"name": "finance-app", "token": "…", "acl_scopes": ["finance-team"]},
+  {"name": "admin", "token": "…", "unrestricted": true}
+]'
+```
+
+`EXCEL_RAG_SERVER__SERVICE_TOKEN` remains for a single trusted caller that applies its own
+authorisation: it is unrestricted and passes the scopes it names through.
 
 ## Phases
 

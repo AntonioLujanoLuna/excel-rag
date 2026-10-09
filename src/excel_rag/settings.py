@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .es import INDEX_CHUNKS, INDEX_STRUCTURE, INDEX_VERSIONS
@@ -57,12 +57,46 @@ class ElasticsearchSettings(BaseModel):
         return self.index_name(INDEX_VERSIONS)
 
 
+class Principal(BaseModel):
+    """A caller identified by its token, and the ACL scopes that caller holds.
+
+    The scopes a request is filtered by come from here, not from the request body: a restricted
+    principal may *narrow* its scopes per request but never name one it does not hold. A principal
+    with no scopes must say so explicitly with ``unrestricted`` -- an empty scope list means "no
+    filter" downstream, which is too dangerous to be a default.
+    """
+
+    name: str
+    token: SecretStr
+    acl_scopes: tuple[str, ...] = ()
+    unrestricted: bool = False
+
+    @model_validator(mode="after")
+    def _scoped_or_explicitly_unrestricted(self) -> Principal:
+        if not self.unrestricted and not self.acl_scopes:
+            raise ValueError(
+                f"principal {self.name!r} needs acl_scopes, or unrestricted=true to read everything"
+            )
+        return self
+
+
 class ServerSettings(BaseModel):
     host: str = "127.0.0.1"
     port: int = Field(default=8080, ge=1, le=65535)
     service_token: SecretStr | None = Field(
-        default=None, description="Optional shared token, required on /api/v1 routes when set."
+        default=None,
+        description="Optional shared token for a trusted, unrestricted caller (one that applies "
+        "its own authorisation and passes the scopes it allows); required on /api/v1 when set.",
     )
+    principals: tuple[Principal, ...] = Field(
+        default=(),
+        description="Per-caller tokens with the ACL scopes each holds. When any token is "
+        "configured the /api/v1 routes require one.",
+    )
+
+    @property
+    def authenticated(self) -> bool:
+        return self.service_token is not None or bool(self.principals)
 
 
 class Settings(BaseSettings):

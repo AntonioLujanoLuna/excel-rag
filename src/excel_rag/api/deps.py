@@ -9,6 +9,8 @@ stack above it -- repository, service -- is rebuilt over that client.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Annotated, cast
 
 from fastapi import Depends, HTTPException, Request
@@ -52,33 +54,91 @@ def _bearer(header: str | None) -> str | None:
     return None
 
 
-def require_token(
+@dataclass(frozen=True)
+class Caller:
+    """Who is calling, and which ACL scopes the request may be filtered by."""
+
+    name: str
+    acl_scopes: tuple[str, ...] = ()
+    unrestricted: bool = False
+
+    def scopes_for(self, requested: Sequence[str]) -> tuple[str, ...]:
+        """The scopes one request is filtered by.
+
+        An unrestricted caller passes its requested scopes through (an empty tuple then falls back
+        to ``default_acl_scope`` in the repository). A restricted caller gets the scopes it holds,
+        or the subset it asked for; asking for a scope it does not hold is a 403, not a silent
+        widening and not a silent drop.
+        """
+        if self.unrestricted:
+            return tuple(requested)
+        if not requested:
+            return self.acl_scopes
+        foreign = sorted(set(requested) - set(self.acl_scopes))
+        if foreign:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "type": "forbidden_scope",
+                    "message": f"caller {self.name!r} does not hold scope(s) {foreign}",
+                },
+            )
+        return tuple(dict.fromkeys(requested))
+
+
+#: An open deployment (no token configured): callers assert their own scopes, as before.
+ANONYMOUS = Caller(name="anonymous", unrestricted=True)
+
+
+def get_caller(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-) -> None:
-    """Enforce the optional service token on the ``/api/v1`` routes.
+) -> Caller:
+    """Identify the caller on the ``/api/v1`` routes.
 
-    A deployment with no token configured is open (the default, and what the tests use). With one
-    configured, the caller must present it as ``X-Service-Token`` or ``Authorization: Bearer``.
-    The comparison is constant-time.
+    With no token configured the deployment is open (the default, and what most tests use). With a
+    ``service_token`` or ``principals`` configured, the caller must present a token as
+    ``X-Service-Token`` or ``Authorization: Bearer``. Every configured token is compared, in
+    constant time, so the match does not leak which one was close.
     """
-    token = settings.server.service_token
-    if token is None:
-        return
+    server = settings.server
+    if not server.authenticated:
+        return ANONYMOUS
     supplied = request.headers.get("x-service-token") or _bearer(
         request.headers.get("authorization")
     )
-    if not supplied or not secrets.compare_digest(supplied, token.get_secret_value()):
+    matched: Caller | None = None
+    if supplied:
+        if server.service_token is not None and secrets.compare_digest(
+            supplied.encode(), server.service_token.get_secret_value().encode()
+        ):
+            matched = Caller(name="service", unrestricted=True)
+        for principal in server.principals:
+            if (
+                secrets.compare_digest(
+                    supplied.encode(), principal.token.get_secret_value().encode()
+                )
+                and matched is None
+            ):
+                matched = Caller(
+                    name=principal.name,
+                    acl_scopes=principal.acl_scopes,
+                    unrestricted=principal.unrestricted,
+                )
+    if matched is None:
         raise HTTPException(
             status_code=401,
             detail={"type": "unauthorized", "message": "a valid service token is required"},
         )
+    return matched
 
 
 __all__ = [
+    "ANONYMOUS",
+    "Caller",
+    "get_caller",
     "get_client",
     "get_repository",
     "get_service",
     "get_settings",
-    "require_token",
 ]

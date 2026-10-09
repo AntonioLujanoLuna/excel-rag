@@ -412,6 +412,9 @@ class StructureQuery(BaseModel):
     sheet_names: tuple[str, ...] = ()
     node_types: tuple[NodeType, ...] = ()
     limit: int = Field(default=200, ge=1, le=2000)
+    acl_scopes: tuple[str, ...] = Field(
+        default=(), description="Scopes to narrow to; checked against the caller's own."
+    )
 
 
 class RangeQuery(BaseModel):
@@ -424,3 +427,6 @@ class RangeQuery(BaseModel):
     a1: str
     node_types: tuple[NodeType, ...] = ()
     limit: int = Field(default=50, ge=1, le=500)
+    acl_scopes: tuple[str, ...] = Field(
+        default=(), description="Scopes to narrow to; checked against the caller's own."
+    )

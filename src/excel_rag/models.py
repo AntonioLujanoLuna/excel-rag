@@ -289,7 +289,8 @@ class SearchFilters(BaseModel):
 
     The tolerance this replaces was not a convenience: a caller that put `expand_references` or
     `reference_depth` here instead of at the top level got a 200 with no expansion and no warning,
-    which reads exactly like a broken traversal. A request field in the wrong place is a 422 here.
+    which reads exactly like a broken traversal. A request field in the wrong place is refused here
+    (a 400 with the standard error envelope).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

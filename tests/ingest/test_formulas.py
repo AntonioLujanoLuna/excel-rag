@@ -142,3 +142,23 @@ def test_string_literals_are_not_parsed_as_references() -> None:
 def test_references_are_deduplicated() -> None:
     parsed = parse_formula("=A1+A1+A1", _context())
     assert len(parsed.references) == 1
+
+
+def test_a_function_name_that_looks_like_a_cell_is_not_an_edge() -> None:
+    """``LOG10``, ``ATAN2``, ``DAYS360`` spell valid A1 cells; followed by ``(`` they are calls."""
+    parsed = parse_formula("=LOG10(A1)+ATAN2(B1, C1)+DAYS360 (D1, E1)", _context())
+    targets = {edge.reference.a1_range for edge in parsed.references}
+    assert targets == {"A1", "B1", "C1", "D1", "E1"}
+    assert parsed.unresolved == ()
+
+
+def test_a_quoted_sheet_name_with_an_escaped_apostrophe_resolves() -> None:
+    context = _context(
+        known_sheets=frozenset({"Calc", "Bob's Inputs"}),
+        sheet_max_row={"Calc": 100, "Bob's Inputs": 10},
+    )
+    parsed = parse_formula("='Bob''s Inputs'!B2*2", context)
+    assert [(edge.reference.sheet_name, edge.reference.a1_range) for edge in parsed.references] == [
+        ("Bob's Inputs", "B2")
+    ]
+    assert parsed.unresolved == ()

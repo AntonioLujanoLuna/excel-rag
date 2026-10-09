@@ -8,6 +8,7 @@ from excel_rag.es import INDEX_CHUNKS, INDEX_MAPPINGS, INDEX_STRUCTURE, INDEX_VE
 from excel_rag.fake_es import InMemoryElasticsearch, in_memory_client
 from excel_rag.ingest import IngestError, ingest_workbook
 from excel_rag.ingest.indexer import Indexer, build_client, document_body
+from excel_rag.live import LiveElasticsearch
 from excel_rag.settings import Settings
 
 
@@ -20,6 +21,13 @@ def _indexer(settings: Settings | None = None) -> tuple[InMemoryElasticsearch, I
 def test_build_client_defaults_to_the_in_memory_double() -> None:
     client = build_client(Settings())
     assert client.indices_exists(INDEX_CHUNKS)
+
+
+def test_build_client_uses_the_shared_live_adapter_when_configured() -> None:
+    """Ingestion and the service share one live adapter, whose bulk path raises on rejections."""
+    client = build_client(Settings(use_live_elasticsearch=True))
+    assert isinstance(client, LiveElasticsearch)
+    assert client.calls == []  # the connection is lazy: nothing is attempted until first use
 
 
 def test_ensure_indices_is_idempotent() -> None:

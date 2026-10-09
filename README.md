@@ -99,6 +99,16 @@ deterministic structure without a semantic query. Dependents are answered by int
 `integer_range` spans every nested reference edge carries, so a formula reading `Actuals!D2:D500` is
 a dependent of `Actuals!D100` without one edge per cell.
 
+## Attaching a workbook to a conversation instead
+
+Not every workbook needs an index. `excel_rag.context` renders an attached `.xlsx` (a path or an
+upload's bytes) as markdown for a context window within a token budget — grids with row numbers and
+column letters, regions with headers, units and notes, formulas with Excel's saved values and what
+they read, every omission marked — and gives the model four tools (`read_range`, `find`,
+`precedents`, `dependents`) for what the budget left out. Same reader, same guarantees, no
+Elasticsearch. See [docs/context.md](docs/context.md), `excel-rag render`, and
+`examples/ask_workbook.py`.
+
 ## Invariants
 
 - **No cross-version reads.** Ids are deterministic within `(workbook_id, version)`; a replacement

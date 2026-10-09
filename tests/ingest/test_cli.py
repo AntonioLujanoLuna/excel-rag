@@ -81,3 +81,17 @@ def test_serve_uses_settings_defaults(build, monkeypatch) -> None:
 def test_parser_requires_a_subcommand() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args([])
+
+
+def test_render_command_prints_the_workbook_and_its_cost(build, capsys) -> None:
+    code = cli.main(["render", str(build.path("large_region")), "--budget", "400", "--tools-hint"])
+    assert code == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("# Workbook: ")
+    assert "Use the workbook tools" in captured.out
+    assert "detail rows-" in captured.err and "partial" in captured.err
+
+
+def test_render_command_fails_cleanly_on_a_bad_workbook(build, capsys) -> None:
+    assert cli.main(["render", str(build.path("corrupt_file"))]) == 1
+    assert "not a valid" in capsys.readouterr().err

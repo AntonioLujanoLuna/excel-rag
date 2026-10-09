@@ -69,6 +69,9 @@ class Detail:
 
 DETAIL_LADDER: tuple[Detail, ...] = (
     Detail("full", None, 0, None, None, None),
+    Detail("rows-2000", 2000, 100, 100, 1000, 200, other_cells=1000),
+    Detail("rows-1000", 1000, 50, 80, 600, 160, other_cells=500),
+    Detail("rows-500", 500, 25, 60, 400, 120, other_cells=300),
     Detail("rows-200", 200, 20, 60, 300, 120, other_cells=200),
     Detail("rows-50", 50, 10, 40, 100, 80, other_cells=50),
     Detail("rows-20", 20, 5, 25, 40, 60, other_cells=20),
@@ -343,29 +346,37 @@ def _formulas(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
     if entries:
         out.add("Formulas:")
         for entry in entries:
-            out.add(f"- {_formula(entry, detail)}")
+            limit = None if detail.cell_chars is None else detail.cell_chars * 3
+            out.add(f"- {formula_line(entry, max_chars=limit)}")
     if len(entries) < len(sheet.formulas):
         out.omit(f"({len(sheet.formulas) - len(entries)} more formula(s) omitted.)")
 
 
-def _formula(entry: FormulaEntry, detail: Detail) -> str:
+def formula_line(
+    entry: FormulaEntry, *, qualified: bool = False, max_chars: int | None = None
+) -> str:
+    """One formula (or a cluster of one repeated pattern): where, text, saved value, reads.
+
+    ``qualified`` prefixes the sheet, for lists that span sheets; ``max_chars`` shortens a long
+    formula's text.
+    """
     text = entry.formula if entry.formula.startswith("=") else f"={entry.formula}"
-    text = _cell_text(text, None if detail.cell_chars is None else detail.cell_chars * 3)
+    text = _cell_text(text, max_chars)
+    where = _qualified(entry.sheet_name, entry.a1_range.a1) if qualified else entry.a1_range.a1
     if entry.is_cluster:
-        where = f"{entry.a1_range.a1} ({len(entry.member_coordinates)} cells, one pattern)"
-        result = "values in the grid"
+        where += f" ({len(entry.member_coordinates)} cells, one pattern)"
         text = f"{text} (as in {entry.member_coordinates[0]})"
+        result = "values in the grid" if entry.cached_value is not None else "no saved values"
     else:
-        where = entry.a1_range.a1
         result = (
             _value(entry.cached_value, None) if entry.cached_value is not None else "no saved value"
         )
+    line = f"{where}: {text} → {result}"
     reads = ", ".join(
         dict.fromkeys(
             _qualified(reference.sheet_name, reference.a1_range) for reference in entry.references
         )
     )
-    line = f"{where}: {text} → {result}"
     if reads:
         line += f"; reads {reads}"
     if entry.unresolved_references:
@@ -462,5 +473,6 @@ __all__ = [
     "RenderedWorkbook",
     "TokenCounter",
     "approx_tokens",
+    "formula_line",
     "render_workbook",
 ]

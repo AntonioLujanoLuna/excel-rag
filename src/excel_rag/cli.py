@@ -1,4 +1,4 @@
-"""The ``excel-rag`` command line: index a workbook, inspect what ingestion detects, or serve.
+"""The ``excel-rag`` command line: index a workbook, inspect or render it, or serve the API.
 
 ``serve`` deliberately names the application by **string** (``"excel_rag.app:create_app"``) so this
 module never imports the retrieval workstream: ingestion ships and runs on its own, and uvicorn
@@ -81,6 +81,19 @@ def _index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render(args: argparse.Namespace) -> int:
+    from .context import render_workbook
+
+    rendered = render_workbook(args.path, token_budget=args.budget, tools_hint=args.tools_hint)
+    sys.stdout.write(rendered.text)
+    print(
+        f"excel-rag: ~{rendered.tokens} tokens, detail {rendered.detail}, "
+        f"{'complete' if rendered.complete else 'partial'}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -104,6 +117,19 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser("inspect", help="print detected regions and counts")
     inspect_parser.add_argument("path", help="path to an .xlsx/.xlsm file")
 
+    render_parser = subparsers.add_parser(
+        "render", help="print a workbook as text for a conversation's context window"
+    )
+    render_parser.add_argument("path", help="path to an .xlsx/.xlsm file")
+    render_parser.add_argument(
+        "--budget", type=int, default=8_000, help="token budget (estimated at 3 chars/token)"
+    )
+    render_parser.add_argument(
+        "--tools-hint",
+        action="store_true",
+        help="tell the model omitted ranges can be read with the workbook tools",
+    )
+
     serve_parser = subparsers.add_parser("serve", help="run the retrieval API")
     serve_parser.add_argument("--host")
     serve_parser.add_argument("--port", type=int)
@@ -118,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inspect":
             print(json.dumps(inspect_workbook(args.path), indent=2, sort_keys=True))
             return 0
+        if args.command == "render":
+            return _render(args)
         if args.command == "serve":
             return _serve(args)
     except IngestError as error:

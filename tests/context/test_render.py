@@ -127,3 +127,19 @@ class TestBudget:
 def test_an_unreadable_upload_is_a_workbook_error() -> None:
     with pytest.raises(WorkbookError):
         render_workbook(b"not a zip", name="upload.xlsx")
+
+
+def test_a_formula_column_is_one_line_and_says_when_it_has_no_values(tmp_path: Path) -> None:
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Lines"
+    ws.append(["Units", "Price", "Total"])
+    for row in range(2, 42):
+        ws.append([row, 2.5, f"=A{row}*B{row}"])
+    path = tmp_path / "column.xlsx"
+    wb.save(path)
+    text = render_workbook(path).text
+    assert "- C2:C41 (40 cells, one pattern): =A2*B2 (as in C2) → no saved values" in text
+    assert "reads Lines!A2:A41, Lines!B2:B41" in text

@@ -85,8 +85,12 @@ The response carries `hits` (scored chunks with `source.workbook_id`/`version`/`
 `truncation` — what a bounded expansion dropped and why. It is **retrieval evidence, not a
 generated answer**.
 
-Optional direct-inspection endpoints: `GET /api/v1/excel/{workbook_id}/structure` and
-`POST /api/v1/excel/range` for callers that need deterministic structure without a semantic query.
+Optional direct-inspection endpoints: `GET /api/v1/excel/{workbook_id}/structure`,
+`POST /api/v1/excel/range` (which nodes overlap a rectangle) and `POST /api/v1/excel/dependents`
+(which formulas read a rectangle -- "if I change `Assumptions!C7`, what moves?") for callers that need
+deterministic structure without a semantic query. Dependents are answered by intersecting the
+`integer_range` spans every nested reference edge carries, so a formula reading `Actuals!D2:D500` is
+a dependent of `Actuals!D100` without one edge per cell.
 
 ## Invariants
 

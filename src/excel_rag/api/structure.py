@@ -1,4 +1,4 @@
-"""Direct-inspection endpoints: workbook structure and A1 range intersection.
+"""Direct-inspection endpoints: workbook structure, A1 range intersection, and dependents.
 
 These answer deterministic questions without a semantic query, which is the only reason they exist:
 a caller that already knows the coordinate should not have to phrase a question. Range overlap is
@@ -80,6 +80,27 @@ def range_nodes(
     caller: Annotated[Caller, Depends(get_caller)],
 ) -> RangeResponse:
     """Nodes whose spans intersect ``query.a1``, resolved by range intersection."""
+    return _region_lookup(query, repository, caller, dependents=False)
+
+
+@router.post("/excel/dependents", response_model=RangeResponse)
+def dependents(
+    query: RangeQuery,
+    repository: Annotated[Repository, Depends(get_repository)],
+    caller: Annotated[Caller, Depends(get_caller)],
+) -> RangeResponse:
+    """Nodes whose formulas (or named ranges) read a cell of ``query.a1``: the reverse edges.
+
+    "If I change ``Assumptions!C7``, what moves?" Answered by intersecting the spans on each
+    nested reference edge, so a formula reading ``D2:D500`` is a dependent of ``D100``.
+    """
+    return _region_lookup(query, repository, caller, dependents=True)
+
+
+def _region_lookup(
+    query: RangeQuery, repository: Repository, caller: Caller, *, dependents: bool
+) -> RangeResponse:
+    """Parse the rectangle, pin the active version and the caller's scopes, run one span query."""
     started = time.perf_counter()
     calls_before = repository.es_requests()
     try:
@@ -95,7 +116,8 @@ def range_nodes(
     scope = repository.resolve_scope(
         workbook_ids=(query.workbook_id,), acl_scopes=caller.scopes_for(query.acl_scopes)
     )
-    documents = repository.query_range(
+    lookup = repository.query_dependents if dependents else repository.query_range
+    documents = lookup(
         scope=scope,
         workbook_id=query.workbook_id,
         sheet_name=query.sheet_name,

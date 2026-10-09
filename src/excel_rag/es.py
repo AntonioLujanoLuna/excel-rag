@@ -89,6 +89,8 @@ _MAPPING_TEMPLATE: dict[str, dict[str, Any]] = {
                     "a1_range": {"type": "keyword"},
                     "kind": {"type": "keyword"},
                     "resolved": {"type": "boolean"},
+                    "row_span": _RANGE_SPAN,
+                    "column_span": _RANGE_SPAN,
                 },
             },
             "unresolved_references": {

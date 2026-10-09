@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from ..es import INDEX_MAPPINGS, ElasticsearchLike
+from ..es import ElasticsearchLike, index_mappings
 from ..models import ActiveVersionManifest, ChunkDocument, StructureDocument
 from ..settings import Settings
 from .canonical import WorkbookModel
@@ -64,8 +64,12 @@ class Indexer:
         return self.settings.elasticsearch.index_name(base)
 
     def ensure_indices(self) -> None:
-        """Create any of the three indices that does not yet exist. Idempotent."""
-        for base, mapping in INDEX_MAPPINGS.items():
+        """Create any of the three indices that does not yet exist. Idempotent.
+
+        The mappings are built from the configured embedding dimensionality: a cluster fixes a
+        ``dense_vector``'s ``dims`` at index-creation time and refuses the create without it.
+        """
+        for base, mapping in index_mappings(self.settings.embedding.dims).items():
             name = self._name(base)
             if not self.client.indices_exists(name):
                 self.client.create_index(name, mapping)

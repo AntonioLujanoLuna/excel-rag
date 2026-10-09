@@ -175,5 +175,69 @@ class TestSettings:
         assert {NodeType.CELL, NodeType.NAMED_RANGE, NodeType.FORMULA} <= set(NodeType)
 
 
+class TestEmbeddingDimensionality:
+    """`dims` is required by a real cluster and ignored by the in-memory double.
+
+    An indexed `dense_vector` needs its dimensionality at index-creation time and Elasticsearch
+    refuses the create without it. Nothing in a test suite that runs against a Python dict would
+    notice, which is exactly why these assertions exist.
+    """
+
+    def test_the_default_mappings_declare_the_default_dims(self) -> None:
+        from excel_rag.es import DEFAULT_EMBEDDING_DIMS
+
+        properties = INDEX_MAPPINGS[INDEX_CHUNKS]["properties"]
+        assert properties[EMBEDDING_FIELD]["dims"] == DEFAULT_EMBEDDING_DIMS
+
+    def test_a_configured_dims_lands_in_the_mapping(self) -> None:
+        from excel_rag.es import index_mappings
+
+        built = index_mappings(384)
+        assert built[INDEX_CHUNKS]["properties"][EMBEDDING_FIELD]["dims"] == 384
+
+    def test_calls_do_not_share_state(self) -> None:
+        """A 384-dim mapping must not rewrite the default one: the template is copied."""
+        from excel_rag.es import index_mappings
+
+        index_mappings(384)
+        assert (
+            index_mappings(1024)[INDEX_CHUNKS]["properties"][EMBEDDING_FIELD]["dims"] == 1024
+            and INDEX_MAPPINGS[INDEX_CHUNKS]["properties"][EMBEDDING_FIELD]["dims"] != 384
+        )
+
+    def test_a_dimension_a_vector_cannot_have_is_refused(self) -> None:
+        from excel_rag.es import index_mappings
+
+        for dims in (0, 7, -1):
+            with pytest.raises(ValueError, match="at least 8"):
+                index_mappings(dims)
+
+    def test_the_configured_dims_reach_the_index_that_gets_created(self) -> None:
+        """End to end through the indexer: settings in, created mapping out."""
+        from excel_rag.fake_es import InMemoryElasticsearch
+        from excel_rag.ingest import Indexer
+
+        settings = Settings(embedding={"dims": 384})
+        client = InMemoryElasticsearch()
+        Indexer(client, settings).ensure_indices()
+        created = client.mapping(settings.elasticsearch.chunks_index)
+        dims = created["properties"][EMBEDDING_FIELD]["dims"]
+        assert dims == 384, f"the index was created with dims={dims}, not the configured 384"
+
+    def test_the_mapping_is_indexed_for_knn(self) -> None:
+        """`index: true` is what makes the field searchable — and what requires `dims`."""
+        properties = INDEX_MAPPINGS[INDEX_CHUNKS]["properties"]
+        assert properties[EMBEDDING_FIELD]["index"] is True
+        assert properties[EMBEDDING_FIELD]["similarity"] == "cosine"
+
+    def test_the_in_memory_double_would_not_have_caught_a_missing_dims(self) -> None:
+        """The blindness, asserted: this is why the dimensionality is a test, not a comment."""
+        from excel_rag.fake_es import InMemoryElasticsearch
+
+        blind = InMemoryElasticsearch()
+        blind.create_index("x", {"properties": {"v": {"type": "dense_vector", "index": True}}})
+        assert blind.mapping("x")["properties"]["v"].get("dims") is None
+
+
 def test_version_is_declared() -> None:
     assert __version__ == "0.1.0"

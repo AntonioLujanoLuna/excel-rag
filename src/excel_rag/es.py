@@ -12,6 +12,7 @@ does not get to do, which is how "no additional persistent store" stays true.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Protocol
 
 INDEX_CHUNKS = "excel_chunks"
@@ -31,7 +32,7 @@ COLBERT_FIELD = "colbert"
 
 _RANGE_SPAN = {"type": "integer_range"}
 
-INDEX_MAPPINGS: dict[str, dict[str, Any]] = {
+_MAPPING_TEMPLATE: dict[str, dict[str, Any]] = {
     INDEX_CHUNKS: {
         "properties": {
             "id": {"type": "keyword"},
@@ -98,13 +99,41 @@ INDEX_MAPPINGS: dict[str, dict[str, Any]] = {
 
 #: One bookkeeping index for the active-version manifest.
 INDEX_VERSIONS = "excel_versions"
-INDEX_MAPPINGS[INDEX_VERSIONS] = {
+_MAPPING_TEMPLATE[INDEX_VERSIONS] = {
     "properties": {
         "workbook_id": {"type": "keyword"},
         "active_version": {"type": "integer"},
         "replaced_at": {"type": "date"},
     }
 }
+
+#: The dimensionality assumed when none is configured. Changing it is an index rebuild, because
+#: Elasticsearch fixes a `dense_vector`'s `dims` at index-creation time.
+DEFAULT_EMBEDDING_DIMS = 768
+
+
+def index_mappings(dims: int = DEFAULT_EMBEDDING_DIMS) -> dict[str, dict[str, Any]]:
+    """Build the three mappings with an explicit vector dimensionality.
+
+    ``dims`` is not cosmetic: an indexed ``dense_vector`` needs its dimensionality at index-creation
+    time, and a real cluster **rejects** the create without it. Two things follow, and both are the
+    reason this is a function rather than a constant inside a literal:
+
+    * the embeddings settings pick the dimensionality, so a deployment chooses it once (in
+      ``EXCEL_RAG_EMBEDDING__DIMS``) instead of editing a mapping by hand;
+    * the in-memory double accepts any mapping, so nothing in the suite would otherwise notice a
+      mapping a cluster refuses. The dimensionality is asserted in ``tests/test_contract.py``.
+    """
+    if dims < 8:
+        raise ValueError(f"embedding dims must be at least 8, got {dims}")
+    mappings = deepcopy(_MAPPING_TEMPLATE)
+    mappings[INDEX_CHUNKS]["properties"][EMBEDDING_FIELD]["dims"] = dims
+    return mappings
+
+
+#: The mappings at the default dimensionality, for callers with no settings to hand (the double and
+#: the contract tests). A service calls :func:`index_mappings` with its configured dims.
+INDEX_MAPPINGS: dict[str, dict[str, Any]] = index_mappings()
 
 
 class ElasticsearchLike(Protocol):

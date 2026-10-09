@@ -59,6 +59,13 @@ Both mappings are data in `src/excel_rag/es.py`, and a test asserts the code onl
 the mappings declare — Elasticsearch happily accepts a document whose unknown field can then never
 be matched on, which is the one failure this arrangement prevents.
 
+The chunk mapping is built by `index_mappings(dims)`, and the dimensionality comes from
+`EmbeddingSettings.dims` (`EXCEL_RAG_EMBEDDING__DIMS`). That is not cosmetic: an indexed
+`dense_vector` needs its `dims` at index-creation time and a real cluster **refuses the create**
+without it, while the in-memory double accepts any mapping at all. Since no test running against a
+Python dict could notice, the dimensionality is asserted directly (including a test that documents
+the double's blindness), and changing it is an index rebuild.
+
 ## Retrieval contract
 
 ```bash

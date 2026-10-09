@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..es import ACL_FIELD, INDEX_MAPPINGS, ElasticsearchLike
+from ..es import ACL_FIELD, ElasticsearchLike, index_mappings
 from ..models import A1Range, ChunkDocument, SearchFilters, StructureDocument
 from ..settings import Settings
 
@@ -114,7 +114,7 @@ class Repository:
     # -- index management -----------------------------------------------------------------------
     def ensure_indices(self) -> None:
         """Create any of the three indices that does not yet exist. Idempotent."""
-        for base, mapping in INDEX_MAPPINGS.items():
+        for base, mapping in index_mappings(self._settings.embedding.dims).items():
             name = self._settings.elasticsearch.index_name(base)
             if not self._client.indices_exists(name):
                 self._client.create_index(name, mapping)

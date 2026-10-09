@@ -11,9 +11,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from .. import __version__
+from ..embedding import Embedder
 from ..retrieval import Repository
 from ..settings import Settings
-from .deps import get_repository, get_settings
+from .deps import get_embedder, get_repository, get_settings
 from .schemas import HealthResponse
 
 router = APIRouter(tags=["health"])
@@ -23,12 +24,14 @@ router = APIRouter(tags=["health"])
 def health(
     repository: Annotated[Repository, Depends(get_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
+    embedder: Annotated[Embedder | None, Depends(get_embedder)],
 ) -> HealthResponse:
     return HealthResponse(
         status="ok",
         version=__version__,
         use_live_elasticsearch=settings.use_live_elasticsearch,
         indices=repository.counts(),
+        embedding_model=embedder.model_name if embedder is not None else None,
     )
 
 

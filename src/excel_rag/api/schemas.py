@@ -50,6 +50,8 @@ class HealthResponse(BaseModel):
     version: str
     use_live_elasticsearch: bool
     indices: dict[str, int]
+    #: The model queries are embedded with, or ``None`` when search is lexical only.
+    embedding_model: str | None = None
 
 
 def error_body(

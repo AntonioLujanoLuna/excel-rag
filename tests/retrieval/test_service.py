@@ -107,6 +107,56 @@ class TestSearch:
         assert len(response.hits) == 1
 
 
+class _FixedEmbedder:
+    """Embeds every query as one fixed vector, under the seed's model name."""
+
+    model_name = EMBED
+    dims = 4
+
+    def __init__(self, vector: tuple[float, ...]) -> None:
+        self.vector = vector
+        self.queries: list[str] = []
+
+    def embed_documents(self, texts: list[str]) -> list[tuple[float, ...]]:
+        return [self.vector for _ in texts]
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        self.queries.append(text)
+        return self.vector
+
+
+class TestEmbedder:
+    def test_a_configured_embedder_makes_a_text_request_hybrid(
+        self, settings: Settings, client
+    ) -> None:
+        embedder = _FixedEmbedder((0.0, 0.0, 1.0, 0.0))
+        service = RetrievalService(Repository(client, settings), settings, embedder)
+        response = service.search(_request(top_k=3))
+        assert embedder.queries == ["revenue"]
+        secret = next(hit for hit in response.hits if hit.chunk_id == C_SECRET)
+        assert "embedding" in secret.matched_fields
+        assert response.es_requests >= 3, "manifest, lexical and knn"
+
+    def test_without_an_embedder_no_knn_is_issued(self, settings: Settings, client) -> None:
+        before = len(client.calls)
+        _service(settings, client).search(_request(include_structure=False))
+        assert sum(1 for call in client.calls[before:] if call[0] == "search") == 2
+
+    def test_a_vector_without_its_model_is_not_used(self, settings: Settings, client) -> None:
+        lexical = _service(settings, client).search(_request())
+        unlabelled = _service(settings, client).search(
+            _request(), query_vector=(0.0, 0.0, 1.0, 0.0)
+        )
+        assert [hit.chunk_id for hit in unlabelled.hits] == [hit.chunk_id for hit in lexical.hits]
+
+    def test_nothing_active_embeds_nothing(self, settings: Settings, empty_client) -> None:
+        embedder = _FixedEmbedder((1.0, 0.0, 0.0, 0.0))
+        RetrievalService(Repository(empty_client, settings), settings, embedder).search(
+            SearchRequest(query="revenue")
+        )
+        assert embedder.queries == []
+
+
 class TestFusionHook:
     def test_lexical_run_reports_the_index_score(self, settings: Settings, client) -> None:
         response = _service(settings, client).search(_request())

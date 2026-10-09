@@ -16,6 +16,7 @@ from weakref import WeakSet
 
 from fastapi import Depends, HTTPException, Request
 
+from ..embedding import Embedder
 from ..es import ElasticsearchLike
 from ..retrieval import Repository, RetrievalService
 from ..settings import Settings
@@ -49,11 +50,17 @@ def get_repository(
     return repository
 
 
+def get_embedder(request: Request) -> Embedder | None:
+    """The app's query embedder (built once, loaded on first use), or ``None``: lexical only."""
+    return cast("Embedder | None", getattr(request.app.state, "embedder", None))
+
+
 def get_service(
     repository: Annotated[Repository, Depends(get_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
+    embedder: Annotated[Embedder | None, Depends(get_embedder)],
 ) -> RetrievalService:
-    return RetrievalService(repository, settings)
+    return RetrievalService(repository, settings, embedder)
 
 
 def _bearer(header: str | None) -> str | None:
@@ -149,6 +156,7 @@ __all__ = [
     "Caller",
     "get_caller",
     "get_client",
+    "get_embedder",
     "get_repository",
     "get_service",
     "get_settings",

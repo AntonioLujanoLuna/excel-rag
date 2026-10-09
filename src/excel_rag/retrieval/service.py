@@ -1,8 +1,10 @@
 """Orchestration: one :class:`~excel_rag.models.SearchRequest` in, one ``SearchResponse`` out.
 
 The service is the only place that knows the order of operations. It resolves the scope once (ACL
-scopes and active versions), spends one primary query, re-ranks the candidate window, then -- only
-if asked -- expands references under the budgets in :class:`~excel_rag.settings.BudgetSettings`.
+scopes and active versions), embeds the query when an embedder is configured, runs the lexical query
+and -- with a vector -- the ``knn`` query over the same filters, fuses the two lists by reciprocal
+rank, then -- only if asked -- expands references under the budgets in
+:class:`~excel_rag.settings.BudgetSettings`.
 Every bound comes from settings; nothing here is hardcoded.
 
 The response is retrieval evidence. It never synthesises an answer, and ``took_ms``/``es_requests``
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import time
 
+from ..embedding import Embedder
 from ..models import (
     Hit,
     NodePayload,
@@ -22,11 +25,12 @@ from ..models import (
 )
 from ..settings import Settings
 from .expansion import ExpansionResult, expand
-from .fusion import Candidate, RankedCandidate, matched_fields, rank
+from .fusion import RankedCandidate, fuse, matched_fields
 from .repository import Repository, Scope
 
-#: The candidate window the lexical query returns before fusion re-ranks it. A multiple of ``top_k``
-#: so a vector re-rank has something to promote, floored so a small ``top_k`` still gets a window.
+#: How many hits each retriever returns before fusion. A multiple of ``top_k`` so a chunk ranked low
+#: by one retriever and high by the other can still reach the top; floored so a small ``top_k``
+#: still fuses over a window.
 CANDIDATE_WINDOW_FACTOR = 5
 CANDIDATE_WINDOW_FLOOR = 50
 CANDIDATE_WINDOW_CEILING = 500
@@ -35,9 +39,12 @@ CANDIDATE_WINDOW_CEILING = 500
 class RetrievalService:
     """The retrieval workflow, independent of HTTP."""
 
-    def __init__(self, repository: Repository, settings: Settings) -> None:
+    def __init__(
+        self, repository: Repository, settings: Settings, embedder: Embedder | None = None
+    ) -> None:
         self._repository = repository
         self._settings = settings
+        self._embedder = embedder
 
     def search(
         self,
@@ -46,9 +53,12 @@ class RetrievalService:
         query_vector: tuple[float, ...] | None = None,
         query_embedding_model: str | None = None,
     ) -> SearchResponse:
-        """Run one search. ``query_vector`` is optional because the frozen HTTP request has no
-        vector field; the endpoint runs lexical-only, and a caller that embeds the query passes a
-        vector here to exercise the fusion path."""
+        """Run one search: lexical always, ``knn`` too when there is a query vector.
+
+        The vector comes from the configured embedder (the HTTP path: the request carries only
+        text), or from the caller with the model that produced it. A vector without a model is
+        not comparable with anything indexed, so it is not used.
+        """
         started = time.perf_counter()
         calls_before = self._repository.es_requests()
 
@@ -56,23 +66,31 @@ class RetrievalService:
             workbook_ids=request.filters.workbook_ids,
             acl_scopes=request.filters.acl_scopes,
         )
+        if query_vector is None and self._embedder is not None and scope.versions:
+            query_vector = self._embedder.embed_query(request.query)
+            query_embedding_model = self._embedder.model_name
         window = min(
             max(request.top_k * CANDIDATE_WINDOW_FACTOR, CANDIDATE_WINDOW_FLOOR),
             CANDIDATE_WINDOW_CEILING,
         )
-        scored = self._repository.search_chunks(
+        lexical = self._repository.search_chunks(
             request.query,
             filters=request.filters,
             scope=scope,
             size=window,
         )
-        candidates = [Candidate(chunk=chunk, lexical_score=score) for chunk, score in scored]
-        ranked = rank(
-            candidates,
-            query_vector=query_vector,
-            query_model=query_embedding_model,
+        vector = (
+            self._repository.knn_chunks(
+                query_vector,
+                model=query_embedding_model,
+                filters=request.filters,
+                scope=scope,
+                k=window,
+            )
+            if query_vector is not None and query_embedding_model is not None
+            else None
         )
-        top = ranked[: request.top_k]
+        top = fuse(lexical, vector)[: request.top_k]
 
         expansion = ExpansionResult()
         if request.include_structure:
@@ -157,7 +175,7 @@ def _hit(ranked: RankedCandidate, related_node_ids: tuple[str, ...], query: str)
         node_id=chunk.node_id,
         title=chunk.title,
         headers=chunk.headers,
-        matched_fields=matched_fields(query, chunk),
+        matched_fields=matched_fields(query, chunk, vector_matched=ranked.vector_matched),
         related_node_ids=related_node_ids,
     )
 

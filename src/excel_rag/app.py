@@ -9,9 +9,12 @@ dependency rather than by rebuilding the app.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from weakref import WeakSet
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -21,6 +24,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from . import __version__
 from .api import health, search, structure
 from .api.schemas import error_body
+from .embedding import build_embedder
 from .es import ElasticsearchLike
 from .fake_es import in_memory_client
 from .retrieval import TooManyWorkbooks, UnknownWorkbook
@@ -47,12 +51,16 @@ def create_client(settings: Settings) -> ElasticsearchLike:
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings()
     app = FastAPI(
+        lifespan=_warm_embedder,
         title="excel-rag",
         version=__version__,
         description="Structure-aware retrieval over Excel workbooks. Evidence, not answers.",
     )
     app.state.settings = resolved
     app.state.client = create_client(resolved)
+    #: One embedder per app: the model loads once (on the first query, or at startup through the
+    #: lifespan) and is shared by every request thread.
+    app.state.embedder = build_embedder(resolved.embedding)
     #: Clients whose indices are known to exist, so a request does not re-check them.
     app.state.ensured_clients = WeakSet()
 
@@ -63,6 +71,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     _register_handlers(app)
     _install_size_guard(app)
     return app
+
+
+@asynccontextmanager
+async def _warm_embedder(app: FastAPI) -> AsyncIterator[None]:
+    """Load the query model before serving, so the first search does not pay for it.
+
+    A server started by uvicorn runs this; a test client used without a ``with`` block does not,
+    and its embedder (if any) loads on first use instead.
+    """
+    embedder = getattr(app.state, "embedder", None)
+    if embedder is not None:
+        await run_in_threadpool(embedder.embed_query, "warm-up")
+    yield
 
 
 def _install_size_guard(app: FastAPI) -> None:

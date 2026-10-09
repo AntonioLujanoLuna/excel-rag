@@ -14,6 +14,7 @@ from conftest import (
     C_REVENUE,
     C_SECRET,
     C_STALE,
+    EMBED,
     EXEC,
     FINANCE,
     N_CELL,
@@ -100,6 +101,60 @@ class TestScope:
         assert not scope.visible({"workbook_id": WB, "version": 1, "acl_scope": [EXEC]})
         assert not scope.visible({"workbook_id": WB, "version": 2, "acl_scope": [FINANCE]})
         assert not scope.visible({"workbook_id": OTHER_WB, "version": 1, "acl_scope": [FINANCE]})
+
+
+class TestKnn:
+    def test_returns_nearest_chunks_without_their_vectors(self, settings: Settings, client) -> None:
+        repository = Repository(client, settings)
+        scope = repository.resolve_scope(workbook_ids=(WB,))
+        scored = repository.knn_chunks(
+            (0.0, 1.0, 0.0, 0.0), model=EMBED, filters=SearchFilters(), scope=scope, k=2
+        )
+        assert scored[0][0].id == C_HR
+        assert len(scored) == 2
+        assert all(chunk.embedding is None for chunk, _ in scored), "vectors stay in the index"
+
+    def test_acl_and_version_filters_apply_inside_knn(self, settings: Settings, client) -> None:
+        repository = Repository(client, settings)
+        scope = repository.resolve_scope(workbook_ids=(WB,), acl_scopes=(FINANCE,))
+        ids = {
+            chunk.id
+            for chunk, _ in repository.knn_chunks(
+                (0.0, 0.0, 1.0, 0.0), model=EMBED, filters=SearchFilters(), scope=scope, k=10
+            )
+        }
+        assert C_SECRET not in ids and C_HR not in ids and C_STALE not in ids
+        assert C_REVENUE in ids
+
+    def test_a_foreign_model_is_a_miss(self, settings: Settings, client) -> None:
+        repository = Repository(client, settings)
+        scope = repository.resolve_scope(workbook_ids=(WB,))
+        assert (
+            repository.knn_chunks(
+                (1.0, 0.0, 0.0, 0.0),
+                model="another-model",
+                filters=SearchFilters(),
+                scope=scope,
+                k=10,
+            )
+            == []
+        )
+
+    def test_nothing_active_is_nothing_found(self, settings: Settings, empty_client) -> None:
+        repository = Repository(empty_client, settings)
+        scope = repository.resolve_scope()
+        assert (
+            repository.knn_chunks(
+                (1.0, 0.0, 0.0, 0.0), model=EMBED, filters=SearchFilters(), scope=scope, k=10
+            )
+            == []
+        )
+
+    def test_lexical_search_leaves_vectors_in_the_index(self, settings: Settings, client) -> None:
+        repository = Repository(client, settings)
+        scope = repository.resolve_scope(workbook_ids=(WB,))
+        scored = repository.search_chunks("revenue", filters=SearchFilters(), scope=scope, size=5)
+        assert scored and all(chunk.embedding is None for chunk, _ in scored)
 
 
 class TestPrimarySearch:

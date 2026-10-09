@@ -7,7 +7,7 @@ The package is layered so the ACL and version filters cannot be forgotten in a c
   and related-node ``_mget`` lookups all go through a single
   :class:`~excel_rag.retrieval.repository.Scope`, which builds the server-side filters and re-checks
   ``_mget`` results the index does not filter.
-* :mod:`excel_rag.retrieval.fusion` re-ranks the candidate window the index returned.
+* :mod:`excel_rag.retrieval.fusion` merges the lexical and ``knn`` result lists by reciprocal rank.
 * :mod:`excel_rag.retrieval.expansion` walks the ``references`` edges under the request budgets.
 * :mod:`excel_rag.retrieval.service` orchestrates the three into a
   :class:`~excel_rag.models.SearchResponse`.
@@ -16,7 +16,7 @@ The package is layered so the ACL and version filters cannot be forgotten in a c
 from __future__ import annotations
 
 from .expansion import ExpansionResult, expand, node_payload
-from .fusion import Candidate, RankedCandidate, cosine_similarity, rank
+from .fusion import Candidate, RankedCandidate, fuse
 from .repository import NodeFetch, Repository, Scope, TooManyWorkbooks, UnknownWorkbook
 from .service import RetrievalService
 
@@ -30,8 +30,7 @@ __all__ = [
     "Scope",
     "TooManyWorkbooks",
     "UnknownWorkbook",
-    "cosine_similarity",
     "expand",
+    "fuse",
     "node_payload",
-    "rank",
 ]

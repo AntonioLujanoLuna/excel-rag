@@ -3,8 +3,9 @@
 These answer deterministic questions without a semantic query, which is the only reason they exist:
 a caller that already knows the coordinate should not have to phrase a question. Range overlap is
 answered by ``integer_range`` intersection on ``row_span``/``column_span`` -- never by walking
-cells -- and both routes go through the same scope filter as search, so an unknown workbook is a
-404 and an unauthorized node is never returned.
+cells -- and both routes go through the same scope filter as search, with the scopes taken from the
+caller (see :class:`~excel_rag.api.deps.Caller`), so an unknown workbook is a 404 and an
+unauthorized node is never returned.
 """
 
 from __future__ import annotations
@@ -16,13 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..models import A1Range, NodeType, RangeQuery, StructureQuery
 from ..retrieval import Repository, UnknownWorkbook, node_payload
-from .deps import get_repository, require_token
+from .deps import Caller, get_caller, get_repository
 from .schemas import RangeResponse, StructureResponse
 
 router = APIRouter(
     prefix="/api/v1",
     tags=["structure"],
-    dependencies=[Depends(require_token)],
+    dependencies=[Depends(get_caller)],
 )
 
 
@@ -30,9 +31,11 @@ router = APIRouter(
 def workbook_structure(
     workbook_id: str,
     repository: Annotated[Repository, Depends(get_repository)],
+    caller: Annotated[Caller, Depends(get_caller)],
     sheet_names: Annotated[list[str] | None, Query()] = None,
     node_types: Annotated[list[NodeType] | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=2000)] = 200,
+    acl_scopes: Annotated[list[str] | None, Query()] = None,
 ) -> StructureResponse:
     """Structural nodes for one workbook, at its active version, filtered by scope.
 
@@ -49,8 +52,11 @@ def workbook_structure(
         sheet_names=tuple(sheet_names or ()),
         node_types=tuple(node_types or ()),
         limit=limit,
+        acl_scopes=tuple(acl_scopes or ()),
     )
-    scope = repository.resolve_scope(workbook_ids=query.workbook_ids)
+    scope = repository.resolve_scope(
+        workbook_ids=query.workbook_ids, acl_scopes=caller.scopes_for(query.acl_scopes)
+    )
     documents = repository.query_structure(
         scope=scope,
         workbook_ids=query.workbook_ids,
@@ -71,6 +77,7 @@ def workbook_structure(
 def range_nodes(
     query: RangeQuery,
     repository: Annotated[Repository, Depends(get_repository)],
+    caller: Annotated[Caller, Depends(get_caller)],
 ) -> RangeResponse:
     """Nodes whose spans intersect ``query.a1``, resolved by range intersection."""
     started = time.perf_counter()
@@ -85,7 +92,9 @@ def range_nodes(
     version = repository.active_version(query.workbook_id)
     if version is None:
         raise UnknownWorkbook(query.workbook_id)
-    scope = repository.resolve_scope(workbook_ids=(query.workbook_id,))
+    scope = repository.resolve_scope(
+        workbook_ids=(query.workbook_id,), acl_scopes=caller.scopes_for(query.acl_scopes)
+    )
     documents = repository.query_range(
         scope=scope,
         workbook_id=query.workbook_id,

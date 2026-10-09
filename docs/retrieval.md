@@ -199,3 +199,20 @@ Reading it honestly:
   implement dense-vector search, so no precision/recall number is claimed for the fusion.
 - Real `knn` behaviour, index-time analysis, and production BM25 scoring are all cluster-side and
   unmeasured here.
+
+## Request validation: a misplaced field is a 422, not a no-op
+
+The request models (`SearchRequest`, `SearchFilters`, `StructureQuery`, `RangeQuery`) are declared
+`extra="forbid"`. Before that, a caller that put `expand_references` or `reference_depth` inside
+`filters` instead of at the top level received **200 with no expansion and no warning** — which reads
+exactly like a broken traversal, and cost a debugging round here: the first version of the seam test
+reported "no reference was followed" when the request was what was wrong. A request field in the
+wrong place fails loudly now.
+
+## The seam is tested
+
+`tests/test_integration.py` covers the join neither half could test alone: a document ingestion writes
+is one retrieval finds; every hit names a node that exists in the structure index; the formula edge
+of the `cross_sheet_formula` fixture is followed end to end through the API to both of its targets;
+a scope the caller lacks returns nothing; a related node the caller may not read is never returned
+through the join; and a search never mixes versions.

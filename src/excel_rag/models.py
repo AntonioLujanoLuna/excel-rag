@@ -285,7 +285,14 @@ class ActiveVersionManifest(BaseModel):
 # Retrieval contract
 # -------------------------------------------------------------------------------------------------
 class SearchFilters(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    """Filters applied inside the query. Unknown keys are refused, not ignored.
+
+    The tolerance this replaces was not a convenience: a caller that put `expand_references` or
+    `reference_depth` here instead of at the top level got a 200 with no expansion and no warning,
+    which reads exactly like a broken traversal. A request field in the wrong place is a 422 here.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     workbook_ids: tuple[str, ...] = ()
     sheet_names: tuple[str, ...] = ()
@@ -298,6 +305,7 @@ class SearchFilters(BaseModel):
 
 
 class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     query: str = Field(description="Natural-language query. Blank input is refused below.")
     filters: SearchFilters = Field(default_factory=SearchFilters)
     top_k: int = Field(default=10, ge=1, le=100)
@@ -372,6 +380,8 @@ class SearchResponse(BaseModel):
 class StructureQuery(BaseModel):
     """The optional direct inspection path: structure for a workbook, with no semantic search."""
 
+    model_config = ConfigDict(extra="forbid")
+
     workbook_ids: tuple[str, ...] = ()
     sheet_names: tuple[str, ...] = ()
     node_types: tuple[NodeType, ...] = ()
@@ -380,6 +390,8 @@ class StructureQuery(BaseModel):
 
 class RangeQuery(BaseModel):
     """Which nodes overlap a rectangle, resolved by span intersection, not by scanning cells."""
+
+    model_config = ConfigDict(extra="forbid")
 
     workbook_id: str
     sheet_name: str

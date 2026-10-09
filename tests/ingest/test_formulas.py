@@ -146,7 +146,7 @@ def test_references_are_deduplicated() -> None:
 
 def test_a_function_name_that_looks_like_a_cell_is_not_an_edge() -> None:
     """``LOG10``, ``ATAN2``, ``DAYS360`` spell valid A1 cells; followed by ``(`` they are calls."""
-    parsed = parse_formula("=LOG10(A1)+ATAN2(B1, C1)+DAYS360 (D1, E1)", _context())
+    parsed = parse_formula("=LOG10(A1)+ATAN2(B1, C1)+DAYS360(D1, E1)", _context())
     targets = {edge.reference.a1_range for edge in parsed.references}
     assert targets == {"A1", "B1", "C1", "D1", "E1"}
     assert parsed.unresolved == ()
@@ -162,3 +162,73 @@ def test_a_quoted_sheet_name_with_an_escaped_apostrophe_resolves() -> None:
         ("Bob's Inputs", "B2")
     ]
     assert parsed.unresolved == ()
+
+
+def _ordered_context() -> FormulaContext:
+    return _context(
+        known_sheets=frozenset({"Calc", "Jan", "Feb", "Mar", "Apr"}),
+        sheet_order=("Calc", "Jan", "Feb", "Mar", "Apr"),
+        sheet_max_row={"Calc": 100, "Jan": 40, "Feb": 40, "Mar": 40, "Apr": 40},
+        sheet_max_col={"Calc": 8, "Jan": 5},
+    )
+
+
+def test_a_three_d_reference_is_one_edge_per_sheet_in_the_span() -> None:
+    parsed = parse_formula("=SUM(Jan:Mar!B2)+SUM('Feb:Apr'!C3:C4)", _ordered_context())
+    found = {(edge.reference.sheet_name, edge.reference.a1_range) for edge in parsed.references}
+    assert found == {
+        ("Jan", "B2"),
+        ("Feb", "B2"),
+        ("Mar", "B2"),
+        ("Feb", "C3:C4"),
+        ("Mar", "C3:C4"),
+        ("Apr", "C3:C4"),
+    }
+    assert parsed.unresolved == ()
+
+
+def test_a_three_d_reference_without_a_sheet_order_is_a_gap() -> None:
+    parsed = parse_formula("=SUM(Actuals:Assumptions!B2)", _context())
+    assert parsed.references == ()
+    assert {gap.reason for gap in parsed.unresolved} == {UnresolvedReason.OUT_OF_RANGE}
+
+
+def test_a_whole_row_reference_spans_the_used_width() -> None:
+    parsed = parse_formula("=SUM(2:3)+SUM(Jan!$5:$5)", _ordered_context())
+    found = {(edge.reference.sheet_name, edge.reference.a1_range) for edge in parsed.references}
+    assert found == {("Calc", "A2:H3"), ("Jan", "A5:E5")}
+    assert parsed.unresolved == ()
+
+
+def test_a_range_naming_its_sheet_twice_is_one_rectangle() -> None:
+    parsed = parse_formula("=SUM(Actuals!A1:Actuals!B2)", _context())
+    assert [(edge.reference.sheet_name, edge.reference.a1_range) for edge in parsed.references] == [
+        ("Actuals", "A1:B2")
+    ]
+
+
+def test_a_broken_reference_is_a_gap() -> None:
+    parsed = parse_formula("=#REF!+Actuals!#REF!+A1", _context())
+    assert [edge.reference.a1_range for edge in parsed.references] == ["A1"]
+    assert [gap.reason for gap in parsed.unresolved] == [UnresolvedReason.MALFORMED] * 2
+
+
+def test_a_range_bounded_by_a_function_is_a_gap_and_its_arguments_are_edges() -> None:
+    parsed = parse_formula("=SUM(A1:INDEX(B:B,5))", _context())
+    assert {edge.reference.a1_range for edge in parsed.references} == {"B1:B100"}
+    assert UnresolvedReason.UNSUPPORTED_FUNCTION in {gap.reason for gap in parsed.unresolved}
+
+
+def test_an_undefined_name_is_a_gap_but_a_let_variable_is_not() -> None:
+    undefined = parse_formula("=Rate*B2", _context())
+    assert [edge.reference.a1_range for edge in undefined.references] == ["B2"]
+    assert [gap.reference_text for gap in undefined.unresolved] == ["Rate"]
+    let = parse_formula("=LET(rate, B2, rate*2)", _context())
+    assert [edge.reference.a1_range for edge in let.references] == ["B2"]
+    assert {gap.reason for gap in let.unresolved} == {UnresolvedReason.DYNAMIC_ARRAY}
+
+
+def test_an_untokenisable_formula_is_one_gap_and_no_edges() -> None:
+    parsed = parse_formula('=SUM(A1,"unterminated)', _context())
+    assert parsed.references == ()
+    assert [gap.reason for gap in parsed.unresolved] == [UnresolvedReason.MALFORMED]

@@ -112,10 +112,15 @@ relative precedent — so a 200-row `=A2*2` column is a single edge to `A2:A201`
 
 ## Formula reference extraction
 
-Pure text analysis, never evaluation. It records typed `Reference` edges for same-sheet and
-cross-sheet A1 cells and ranges, absolute (`$A$1`) and relative refs, whole-column refs (`A:B`),
-structured table refs (`Table1[Amount]`) and named ranges. Everything that cannot be resolved
-statically becomes an `UnresolvedReference` with the right reason:
+Pure text analysis, never evaluation. Formulas are tokenised with openpyxl's
+`openpyxl.formula.tokenizer.Tokenizer`, which separates function calls, string literals and reference
+operands; only `OPERAND RANGE` tokens are resolved, so a function whose name spells a cell (`LOG10`,
+`ATAN2`, `DAYS360`) is never an edge. It records typed `Reference` edges for same-sheet and
+cross-sheet A1 cells and ranges (including `'Bob''s Inputs'!B2` and `Sheet1!A1:Sheet1!B2`), absolute
+(`$A$1`) and relative refs, whole-column refs (`A:B`, clipped to the used height), whole-row refs
+(`2:3`, clipped to the used width), 3-D refs (`Jan:Mar!B2`, one edge per sheet in workbook order),
+structured table refs (`Table1[Amount]`), and workbook- or sheet-scoped named ranges. Everything that
+cannot be resolved statically becomes an `UnresolvedReference` with the right reason:
 
 | trigger | reason |
 |---|---|
@@ -123,10 +128,13 @@ statically becomes an `UnresolvedReference` with the right reason:
 | `OFFSET(...)` | `volatile_offset` |
 | `[Budget.xlsx]…`, `'…[Book.xlsx]Sheet'!A1`, `[1]…` | `external_link` |
 | `LET`, `LAMBDA`, `@`, spill `#`, dynamic-array functions | `dynamic_array` |
-| `_xlfn.`/`_xludf.` forms, unknown function forms | `unsupported_function` |
+| `_xlfn.`/`_xludf.` forms; a range bounded by a function (`A1:INDEX(…)`) | `unsupported_function` |
 | reference to a macro sheet | `macro_sheet` |
-| reference to a sheet that does not exist / unknown table or column | `out_of_range` |
-| a token that matches a reference shape but will not parse | `malformed` |
+| unknown sheet, table, column or name; a 3-D ref with unknown sheet order | `out_of_range` |
+| `#REF!`, a range across two sheets, a formula the tokenizer refuses | `malformed` |
+
+Inside `LET`/`LAMBDA` a bare identifier is a local variable, so it is not reported as an unknown name
+(the formula already carries its `dynamic_array` gap).
 
 A string literal is never scanned for references (`=IF(A1="B2",…)` yields only the `A1` edge), and
 duplicate edges are collapsed. Edges point at ranges, not cells.

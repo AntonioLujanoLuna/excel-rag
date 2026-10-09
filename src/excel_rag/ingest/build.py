@@ -11,6 +11,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from openpyxl.formula.tokenizer import (  # type: ignore[import-untyped]
+    Token,
+    Tokenizer,
+    TokenizerError,
+)
+
 from ..models import A1Range, Reference, ReferenceKind
 from .canonical import (
     CellValue,
@@ -42,13 +48,28 @@ _REF_ROW_RE = re.compile(r"(?<![A-Za-z0-9_])(\$?[A-Za-z]{1,3})(\$?)(\d{1,7})(?![
 
 
 def normalize_formula(formula: str) -> str:
-    """A pattern key: relative row numbers collapse, absolute and constant parts stay literal."""
+    """A pattern key: relative row numbers collapse, absolute and constant parts stay literal.
+
+    Only reference operands are rewritten -- string literals, numbers and function names (``LOG10``)
+    are kept verbatim -- so ``="Q1"&A2`` and ``="Q2"&A3`` are different patterns. A formula the
+    tokenizer refuses falls back to rewriting the whole text.
+    """
 
     def replace(match: re.Match[str]) -> str:
         column, dollar, _row = match.group(1), match.group(2), match.group(3)
         return f"{column}#" if dollar == "" else match.group(0)
 
-    return _REF_ROW_RE.sub(replace, formula)
+    try:
+        tokens = Tokenizer(formula if formula.startswith("=") else f"={formula}").items
+    except TokenizerError:
+        return _REF_ROW_RE.sub(replace, formula)
+    parts = [
+        _REF_ROW_RE.sub(replace, token.value)
+        if token.type == Token.OPERAND and token.subtype == Token.RANGE
+        else token.value
+        for token in tokens
+    ]
+    return ("=" if formula.startswith("=") else "") + "".join(parts)
 
 
 def _col_range_a1(min_col: int, max_col: int, min_row: int, max_row: int) -> str:
@@ -231,6 +252,12 @@ def build_model(
         for sheet in raw.sheets
     }
 
+    sheet_max_col = {
+        sheet.name: (max((cell.column for cell in sheet.cells.values()), default=1))
+        for sheet in raw.sheets
+    }
+    sheet_order = tuple(sheet.name for sheet in raw.sheets)
+
     sheets: list[SheetModel] = []
     for sheet in raw.sheets:
         context = FormulaContext(
@@ -242,6 +269,8 @@ def build_model(
             sheet_max_row=sheet_max_row,
             tables=tables,
             defined_names=defined_names,
+            sheet_order=sheet_order,
+            sheet_max_col=sheet_max_col,
         )
         regions: tuple[Region, ...] = detect_regions(
             sheet, workbook_id=workbook_id, version=version, config=settings

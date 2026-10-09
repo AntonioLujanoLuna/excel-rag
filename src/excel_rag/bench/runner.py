@@ -104,7 +104,12 @@ def run_benchmark(
     """Build a corpus, index it, and measure every endpoint plus bounded expansion."""
     # The bench raises the traversal budget so depth 0/1/2 are all actually reachable; the service
     # still caps every request at whatever the settings allow.
-    settings = Settings(budgets={"reference_depth": 3, "max_related_nodes": 200})
+    # The corpus carries synthetic vectors, so the endpoint is measured lexical-only: loading a
+    # real model here would put its start-up and a CPU forward pass into every latency figure.
+    settings = Settings(
+        budgets={"reference_depth": 3, "max_related_nodes": 200},
+        embedding={"provider": "none"},
+    )
     corpus = build_corpus(
         workbooks=workbooks,
         sheets=sheets,

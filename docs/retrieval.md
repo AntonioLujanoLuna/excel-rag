@@ -6,7 +6,7 @@ evidence** — coordinates, values, formulas and resolved references — never a
 
 Everything below applies to the two real code paths: the in-memory double the tests and a laptop
 demo run against, and the live adapter in `src/excel_rag/live.py`. Where they differ — latency, the
-vector search — the difference is stated.
+exactness of `knn` — the difference is stated.
 
 ## Endpoints
 
@@ -109,32 +109,38 @@ When `filters.acl_scopes` is empty the deployment applies `Settings.default_acl_
 also empty the deployment is unscoped and no ACL clause is added. This is the "no ACLs configured"
 case and the route layer is where that decision lives.
 
-## Hybrid fusion — and its honest limits
+## Hybrid search — and its honest limits
 
-`retrieval/fusion.py`. The lexical query returns a bounded **candidate window** (5×`top_k`, floored
-at 50, capped at 500). When the caller supplies a query vector and its embedding model, each chunk
-in that window is scored by cosine similarity against its stored `embedding`, and the two rankings
-are combined by **reciprocal-rank fusion** (RRF, k=60).
+`retrieval/service.py`, `retrieval/repository.py`, `retrieval/fusion.py`. The query text is embedded
+with the configured model (`lightonai/mDenseOn` by default, with its `query: ` prompt; chunks were
+embedded at ingestion with `document: `), and two searches run over `excel_chunks`:
 
-- **Why RRF, not a weighted sum.** The lexical score this service receives is *ordinal*: the
-  in-memory double returns counts of matched leaf clauses, not BM25 — the live client returns BM25.
-  A fixed weight cannot reconcile two scales that differ by client. RRF needs only each retriever's
-  *order*, so it behaves the same whichever client is underneath.
-- **A vector from a different model is a miss.** Each chunk carries `embedding_model`. A chunk whose
-  stored vector was produced by a different model (or of a different dimensionality) is excluded from
-  the vector ranking entirely: it keeps its lexical rank and earns no vector contribution. It is not
-  scored against an incomparable vector, and no error is raised.
-- **This is a candidate-window re-rank, not an exhaustive vector search.** The in-memory client does
-  not implement `knn` — it refuses it by design. Vectors are scored in Python over the window the
-  lexical query already returned, so a chunk that the lexical query did not surface cannot be
-  promoted. The live adapter builds a real `knn` query
-  (`live.build_knn_query`, carrying the same ACL/version `filter` clauses); there the candidate
-  window is whatever Elasticsearch returns.
-- **The HTTP endpoint runs lexical-only.** The frozen `SearchRequest` has no vector field, so
-  `POST /api/v1/search/excel` has no way to carry one; it scores with the index's own order. The
-  hybrid path is reached by calling `RetrievalService.search(request, query_vector=..., query_embedding_model=...)`
-  directly, which is what the fusion tests and the service tests do. This is a deliberate consequence
-  of not editing the frozen model.
+1. a BM25 `bool` query over title/content/headers, returning a window of 5×`top_k` hits (floored at
+   50, capped at 500);
+2. a `knn` query over `embedding`, returning the same window size, with `num_candidates` 4× that
+   (floored at 100, capped at 10,000).
+
+Both carry the same ACL, version and facet filters — inside the `knn` clause, so they restrict the
+candidates *before* the nearest neighbours are chosen rather than thinning the result afterwards.
+Neither returns the vectors in `_source`. The two ranked lists are merged by **reciprocal-rank
+fusion** (RRF, k=60); a hit the vector search found lists `embedding` in its `matched_fields`.
+
+- **Why RRF, not a weighted sum.** BM25 is unbounded and corpus-dependent, a cosine `knn` score is
+  `(1 + cos) / 2`, and the in-memory double's lexical score is an ordinal match count. RRF needs
+  only each list's *order*, so it behaves the same whichever client is underneath.
+- **A vector from a different model is a miss.** The `knn` filter pins `embedding_model` to the
+  query's model, so a chunk embedded by another model never enters the vector list: it keeps its
+  lexical rank and earns no vector contribution. Changing the model means re-indexing.
+- **What the vectors add.** Against a real cluster with the real model (`tests/live/test_mdenseon.py`),
+  questions that share no word with the chunk they should find — “¿Qué moneda se usa para los
+  ingresos?”, “Quel est le chiffre d'affaires par région ?”, “expenses per quarter” over English
+  workbooks — return nothing lexically and the right table, column or formula in the hybrid top 3.
+- **No embedder, no vectors.** With `EXCEL_RAG_EMBEDDING__PROVIDER=none` the endpoint is lexical and
+  reports the index's own scores. A caller may also pass its own vector through
+  `RetrievalService.search(request, query_vector=..., query_embedding_model=...)`; a vector without
+  its model is not used.
+- **The in-memory double's `knn` is exact.** It compares every filtered vector, which is the ceiling
+  of what an approximate HNSW search returns; no recall figure from it is a cluster's.
 
 ## Reference expansion and truncation
 
@@ -205,10 +211,12 @@ Reading it honestly:
   Elasticsearch 8.15 (the `live-elasticsearch` CI job; locally, set `EXCEL_RAG_TEST_ES_URL`). Its
   first run found what the in-memory double could not: `delete_by_query` without a refresh left a
   replaced version visible to search and count. No latency number here comes from a cluster.
-- **Recall is not measured.** The in-memory double returns ordinal match counts and does not
-  implement dense-vector search, so no precision/recall number is claimed for the fusion.
-- Real `knn` behaviour, index-time analysis, and production BM25 scoring are all cluster-side and
-  unmeasured here.
+- **Recall is not measured.** `tests/live/test_mdenseon.py` checks that specific cross-lingual and
+  paraphrased questions land in the top 3, which is a regression guard, not a recall figure. No
+  labelled question set exists yet, so no precision/recall number is claimed for the fusion.
+- One data point, not a benchmark: on a CPU-only sandbox, a hybrid query against a single-node
+  Elasticsearch 8.15 took ~100 ms including the query embedding, and embedding + indexing six small
+  workbooks (60 chunks) took ~17 s with the model already downloaded.
 
 ## Request validation: a misplaced field is a 400, not a no-op
 

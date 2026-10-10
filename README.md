@@ -150,7 +150,9 @@ uv run excel-rag serve
 The model downloads (~1.2 GB) on first use and loads before the server accepts requests. Embedding
 settings: `EXCEL_RAG_EMBEDDING__MODEL` (default `lightonai/mDenseOn`), `__DIMS` (768),
 `__DEVICE` (`cpu`/`cuda`/`mps`), `__BATCH_SIZE`, `__MAX_SEQ_LENGTH` (1024 tokens per chunk), and
-`__PROVIDER=none` to index and search without vectors. On a CPU-only host, install torch from
+`__PROVIDER=none` to index and search without vectors. An optional cross-encoder reranks the head
+of the fused list: `EXCEL_RAG_RERANK__PROVIDER=cross-encoder` (default model
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, `__WINDOW` 50 candidates). On a CPU-only host, install torch from
 `https://download.pytorch.org/whl/cpu` first to skip the CUDA wheels.
 
 To run the live tests, including the real model end to end:

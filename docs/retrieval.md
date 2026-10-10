@@ -142,6 +142,20 @@ fusion** (RRF, k=60); a hit the vector search found lists `embedding` in its `ma
 - **The in-memory double's `knn` is exact.** It compares every filtered vector, which is the ceiling
   of what an approximate HNSW search returns; no recall figure from it is a cluster's.
 
+### Optional reranking
+
+`rerank.py`. Off by default. With `EXCEL_RAG_RERANK__PROVIDER=cross-encoder` the head of the fused
+list — `EXCEL_RAG_RERANK__WINDOW` candidates (50), never fewer than `top_k` — is rescored by a
+cross-encoder that reads the query and each chunk's title and content *together*, and reordered by
+that score; the rest of the list keeps its fused order below. The default model,
+`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, is multilingual like the embedder. It needs the `embed`
+extra, loads once per app (at startup through the lifespan) and is shared across request threads.
+A reranked hit's `score_kind` is `rerank`. `provider=overlap` is a token-overlap test double with no
+semantics, for the same reason the hashing embedder exists.
+
+Reranking costs one model pass per windowed candidate per query, so `window` is the latency knob; a
+small window reorders only what fusion already ranked near the top.
+
 ## Reference expansion and truncation
 
 `retrieval/expansion.py`. Breadth-first over the `references` edges of `excel_structure`:

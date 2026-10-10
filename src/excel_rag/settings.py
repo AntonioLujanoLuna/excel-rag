@@ -51,6 +51,22 @@ class EmbeddingSettings(BaseModel):
     device: str | None = None
 
 
+class RerankSettings(BaseModel):
+    """An optional cross-encoder that rescores the top fused candidates (off by default).
+
+    ``window`` is how many fused candidates are rescored; it is at least ``top_k`` for any request,
+    so reranking reorders the window and never drops a hit fusion would have returned. ``overlap``
+    is a deterministic test double with no semantics.
+    """
+
+    provider: Literal["cross-encoder", "overlap", "none"] = "none"
+    model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    window: int = Field(default=50, ge=1, le=500)
+    batch_size: int = Field(default=32, ge=1)
+    max_length: int | None = Field(default=512, ge=16)
+    device: str | None = None
+
+
 class ElasticsearchSettings(BaseModel):
     urls: tuple[str, ...] = ("http://127.0.0.1:9200",)
     username: str | None = None
@@ -127,5 +143,6 @@ class Settings(BaseSettings):
     default_acl_scope: tuple[str, ...] = ()
     budgets: BudgetSettings = Field(default_factory=BudgetSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    rerank: RerankSettings = Field(default_factory=RerankSettings)
     elasticsearch: ElasticsearchSettings = Field(default_factory=ElasticsearchSettings)
     server: ServerSettings = Field(default_factory=ServerSettings)

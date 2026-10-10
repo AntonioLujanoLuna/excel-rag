@@ -18,6 +18,7 @@ from fastapi import Depends, HTTPException, Request
 
 from ..embedding import Embedder
 from ..es import ElasticsearchLike
+from ..rerank import Reranker
 from ..retrieval import Repository, RetrievalService
 from ..settings import Settings
 
@@ -55,12 +56,18 @@ def get_embedder(request: Request) -> Embedder | None:
     return cast("Embedder | None", getattr(request.app.state, "embedder", None))
 
 
+def get_reranker(request: Request) -> Reranker | None:
+    """The app's reranker (built once, loaded on first use), or ``None``: no reranking."""
+    return cast("Reranker | None", getattr(request.app.state, "reranker", None))
+
+
 def get_service(
     repository: Annotated[Repository, Depends(get_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
     embedder: Annotated[Embedder | None, Depends(get_embedder)],
+    reranker: Annotated[Reranker | None, Depends(get_reranker)],
 ) -> RetrievalService:
-    return RetrievalService(repository, settings, embedder)
+    return RetrievalService(repository, settings, embedder, reranker)
 
 
 def _bearer(header: str | None) -> str | None:
@@ -158,6 +165,7 @@ __all__ = [
     "get_client",
     "get_embedder",
     "get_repository",
+    "get_reranker",
     "get_service",
     "get_settings",
 ]

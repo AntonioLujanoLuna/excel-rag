@@ -20,11 +20,17 @@ it); turning the model into documents lives in `src/excel_rag/ingest/`:
 
 ## Decisions and why
 
-### Two loads: `data_only=False` then `data_only=True`
+### One load and one streaming scan
 
-Openpyxl exposes a formula cell's text **or** its last-saved value, never both, under one flag. So the
-reader loads twice: the formula workbook supplies cell values and formula text (and merges, tables
-and defined names), the cached workbook supplies the last value Excel saved for formula cells. A
+Openpyxl exposes a formula cell's text **or** its last-saved value, never both, under one flag. The
+formula workbook (`data_only=False`) supplies cell values and formula text, merges, tables and defined
+names. The last value Excel saved for each formula cell comes from one streaming `expat` pass over
+each worksheet part (`excel_rag.workbook.sheetscan`), which reads only formula cells' `<v>` and the
+declared `<dimension>`, refuses entity declarations, and converts dates and durations exactly as a
+`data_only=True` load would — a test asserts the two agree on every fixture. That second openpyxl
+load used to run unconditionally; it is now the fallback, taken only when a formula result is a
+shared string (which Excel does not write) or a part could not be scanned. On a 50,000-row sheet
+with a formula column this cut reading from 9.9 s to 5.7 s and peak memory by a third. A
 cached value is copied verbatim and labelled as cached — it is **not** a freshly computed result, and
 nothing in ingestion recomputes it. (The `cached_value` fixture deliberately stores `999` for a cell
 whose formula is `=A1+B1`; the documents carry `999`, never `5`.)

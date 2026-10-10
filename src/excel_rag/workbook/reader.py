@@ -1,10 +1,13 @@
 """Read an ``.xlsx`` / ``.xlsm`` into raw sheets -- no macros, no link refresh, no evaluation.
 
-Three rules govern this module:
+The rules that govern this module:
 
-* ``data_only=False`` gives the formula text, a second ``data_only=True`` load gives the last value
-  Excel saved. **Both loads are needed** because openpyxl exposes them under one flag or the other,
-  never together; the cached value is kept separately and labelled as cached, never recomputed.
+* ``data_only=False`` gives the formula text; the last value Excel saved for each formula cell comes
+  from one streaming ``expat`` pass over the sheet part (:mod:`.sheetscan`), which also reads the
+  declared dimension. openpyxl exposes the text and the saved value under one flag or the other,
+  never together, and a second ``data_only=True`` load -- a whole worksheet model to read one
+  ``<v>`` per formula -- is now only the fallback. The cached value is kept separately and
+  labelled as cached, never recomputed.
 * Macros are never loaded (``keep_vba=False``) and never executed -- openpyxl does not run VBA, and
   a workbook carrying a ``vbaProject.bin`` or a macro sheet is only *noticed*, so a formula pointing
   at a macro sheet resolves to an explicit ``macro_sheet`` gap rather than a fabricated edge.
@@ -42,6 +45,7 @@ from openpyxl.worksheet.formula import (  # type: ignore[import-untyped]
 
 from .canonical import CellValue
 from .errors import WorkbookError
+from .sheetscan import SheetScan, cached_value, scan_sheet
 
 _XLNS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _RELNS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -118,6 +122,9 @@ class _PackageFacts:
     sheets: tuple[_SheetFact, ...]
     declared_dimensions: dict[str, str]
     has_vba: bool
+    #: One streaming pass per worksheet part (see :mod:`.sheetscan`), keyed by part name. A part
+    #: that could not be scanned is absent, and the reader falls back to openpyxl's cached load.
+    scans: dict[str, SheetScan] = field(default_factory=dict)
 
     @property
     def macro_names(self) -> frozenset[str]:
@@ -278,6 +285,7 @@ def _read_package(data: bytes) -> _PackageFacts:
 
     sheets: list[_SheetFact] = []
     declared: dict[str, str] = {}
+    scans: dict[str, SheetScan] = {}
     workbook = _parse_xml(archive.read("xl/workbook.xml"), "xl/workbook.xml")
     sheet_container = workbook.find(f"{{{_XLNS}}}sheets")
     if sheet_container is not None:
@@ -298,18 +306,20 @@ def _read_package(data: bytes) -> _PackageFacts:
                     is_macro=is_macro,
                 )
             )
-            if target in names:
+            if target in names and not is_macro:
                 try:
-                    part_root: Element | None = _parse_xml(archive.read(target), target)
+                    with archive.open(target) as stream:
+                        scan = scan_sheet(stream, target)
                 except WorkbookError:
-                    part_root = None
-                if part_root is not None:
-                    dimension = part_root.find(f"{{{_XLNS}}}dimension")
-                    if dimension is not None and dimension.attrib.get("ref"):
-                        declared[target] = dimension.attrib["ref"]
+                    continue  # openpyxl's own load decides whether this part is readable
+                scans[target] = scan
+                if scan.dimension:
+                    declared[target] = scan.dimension
 
     has_vba = any(name.endswith("vbaProject.bin") for name in names)
-    return _PackageFacts(sheets=tuple(sheets), declared_dimensions=declared, has_vba=has_vba)
+    return _PackageFacts(
+        sheets=tuple(sheets), declared_dimensions=declared, has_vba=has_vba, scans=scans
+    )
 
 
 def _load(data: bytes, *, data_only: bool) -> Any:
@@ -352,10 +362,19 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
     facts = _read_package(data)
 
     formula_wb = _load(data, data_only=False)
-    try:
-        cached_wb = _load(data, data_only=True)
-    except WorkbookError:
-        cached_wb = None
+    # The saved values of formula cells come from the streaming scan when every worksheet part was
+    # scanned and none needs the shared-string table; otherwise from openpyxl's data_only load.
+    scanned = all(
+        fact.part in facts.scans and not facts.scans[fact.part].needs_shared_strings
+        for fact in facts.sheets
+        if not fact.is_macro and fact.name in formula_wb.sheetnames
+    )
+    cached_wb: Any = None
+    if not scanned:
+        try:
+            cached_wb = _load(data, data_only=True)
+        except WorkbookError:
+            cached_wb = None
 
     macro_names = facts.macro_names
     sheets: list[RawSheet] = []
@@ -383,6 +402,7 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
         cached_ws = (
             cached_wb[name] if cached_wb is not None and name in cached_wb.sheetnames else None
         )
+        scan = facts.scans.get(fact.part) if scanned and fact is not None else None
         cells: dict[str, CellValue] = {}
         #: Each array formula's master coordinate -> the extent its result was saved over.
         array_extents: dict[str, str] = {}
@@ -397,10 +417,14 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                     formula, extent = _formula_text(cell.value)
                     if extent is not None:
                         array_extents[cell.coordinate] = extent
-                cached_value: Any = None
-                if formula is not None and cached_ws is not None:
-                    cached_value = cached_ws[cell.coordinate].value
                 number_format = cell.number_format or "General"
+                saved: Any = None
+                if formula is not None and scan is not None:
+                    saved = cached_value(
+                        scan.cached.get(cell.coordinate), number_format, formula_wb.epoch
+                    )
+                elif formula is not None and cached_ws is not None:
+                    saved = cached_ws[cell.coordinate].value
                 cells[cell.coordinate] = CellValue(
                     sheet_name=name,
                     coordinate=cell.coordinate,
@@ -408,7 +432,7 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                     column=cell.column,
                     value=cell.value if formula is None else None,
                     formula=formula,
-                    cached_value=cached_value,
+                    cached_value=saved,
                     data_type=data_type,
                     number_format=number_format,
                     is_date=bool(cell.is_date),

@@ -110,6 +110,9 @@ class TableInfo:
     sheet_name: str
     a1_range: A1Range
     columns: tuple[str, ...]
+    #: Header rows at the top of ``a1_range`` and totals rows at its bottom; the rest is data.
+    header_rows: int = 1
+    totals_rows: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,17 +235,23 @@ def _function_gaps(raw_name: str) -> list[UnresolvedReference]:
     return []
 
 
-def _table_columns(spec: str) -> tuple[str, ...]:
-    """The columns a structured reference's specifier names; none means the whole table.
+def _table_specifier(spec: str) -> tuple[frozenset[str], tuple[str, ...]]:
+    """A structured reference's special items (lowercased) and the columns it names.
 
     ``Amount``, ``[#Data],[Amount]``, ``@Amount`` and ``@[Unit Price]`` name one column;
-    ``[Units]:[Price]`` names the two ends of a span; ``#All`` and ``[#Totals]`` name none.
+    ``[Units]:[Price]`` names the two ends of a span; ``#All`` and ``[#Totals]`` name none, and a
+    table with no column named reads every column. ``@`` is ``#This Row``.
     """
-    inner = spec.strip().removeprefix("@").strip()
-    items = re.findall(r"\[([^\[\]]*)\]", inner) if "[" in inner else [inner]
-    return tuple(
-        item.strip() for item in items if item.strip() and not item.strip().startswith("#")
-    )
+    inner = spec.strip()
+    specials: set[str] = set()
+    if inner.startswith("@"):
+        specials.add("#this row")
+        inner = inner[1:].strip()
+    items = [
+        item.strip() for item in (re.findall(r"\[([^\[\]]*)\]", inner) if "[" in inner else [inner])
+    ]
+    specials.update(" ".join(item.lower().split()) for item in items if item.startswith("#"))
+    return frozenset(specials), tuple(item for item in items if item and not item.startswith("#"))
 
 
 def _check_sheet(
@@ -271,8 +280,10 @@ def _check_sheet(
 class _Collector:
     """Accumulates de-duplicated edges and gaps for one formula."""
 
-    def __init__(self, context: FormulaContext) -> None:
+    def __init__(self, context: FormulaContext, row: int | None = None) -> None:
         self.context = context
+        #: The row of the formula being parsed, which ``#This Row`` (``@``) reads.
+        self.row = row
         self.edges: list[ReferenceEdge] = []
         self.unresolved: list[UnresolvedReference] = []
         self._seen_edges: set[tuple[str, str, str, str]] = set()
@@ -331,6 +342,41 @@ class _Collector:
         )
 
 
+def _table_rows(
+    collector: _Collector, info: TableInfo, specials: frozenset[str]
+) -> tuple[int, int, bool] | None:
+    """The rows a specifier selects, and whether they are the formula's own row (``#This Row``).
+
+    The table's rectangle is its header rows, its data rows and its totals rows, in that order;
+    no special item means ``#Data``. ``None`` when the specifier selects a band the table lacks.
+    """
+    top, bottom = info.a1_range.min_row, info.a1_range.max_row
+    bands = {
+        "#headers": (top, top + info.header_rows - 1),
+        "#data": (top + info.header_rows, bottom - info.totals_rows),
+        "#totals": (bottom - info.totals_rows + 1, bottom),
+    }
+    if "#all" in specials:
+        return top, bottom, False
+    if "#this row" in specials:
+        data_top, data_bottom = bands["#data"]
+        row = collector.row
+        if (
+            row is not None
+            and info.sheet_name == collector.context.sheet_name
+            and data_top <= row <= data_bottom
+        ):
+            return row, row, True
+        # Off the table's rows (or unknown), the reference reads no single row we can name: the
+        # column's data rows bound whatever it intersects.
+        return data_top, data_bottom, False
+    selected = [bands[name] for name in ("#headers", "#data", "#totals") if name in specials]
+    first, last = (selected[0][0], selected[-1][1]) if selected else bands["#data"]
+    if first > last or any(low > high for low, high in selected):
+        return None
+    return first, last, False
+
+
 def _resolve_table(collector: _Collector, text: str, table: str | None, spec: str) -> None:
     context = collector.context
     if table is None:
@@ -346,64 +392,55 @@ def _resolve_table(collector: _Collector, text: str, table: str | None, spec: st
             text, UnresolvedReason.OUT_OF_RANGE, f"structured reference to unknown table {table!r}"
         )
         return
-    bounds = (
-        info.a1_range.min_row,
-        info.a1_range.max_row,
-        info.a1_range.min_col,
-        info.a1_range.max_col,
-    )
-    columns = _table_columns(spec)
-    if not columns:
-        collector.edge(
-            range_node_id(context.workbook_id, context.version, info.sheet_name, info.a1_range.a1),
-            info.sheet_name,
-            info.a1_range.a1,
-            ReferenceKind.RANGE,
-            True,
-            bounds,
+    specials, columns = _table_specifier(spec)
+    rows = _table_rows(collector, info, specials)
+    if rows is None:
+        collector.gap(
+            text, UnresolvedReason.MALFORMED, f"table {info.name!r} has no such rows (#REF!)"
         )
         return
-    folded = [name.lower() for name in info.columns]
-    width = info.a1_range.max_col - info.a1_range.min_col + 1
-    positions: list[int] = []
-    for column in columns:
-        position = folded.index(column.lower()) if column.lower() in folded else None
-        if position is None or position >= width:
-            collector.gap(
-                text, UnresolvedReason.OUT_OF_RANGE, f"table {info.name!r} has no column {column!r}"
-            )
-            return
-        positions.append(position)
-    # The column's rectangle over the table's rows (header and totals included: a superset of
-    # what the specifier reads, never a different column).
-    min_col = info.a1_range.min_col + min(positions)
-    max_col = info.a1_range.min_col + max(positions)
-    min_row, max_row = info.a1_range.min_row, info.a1_range.max_row
+    min_row, max_row, this_row = rows
+
+    min_col, max_col = info.a1_range.min_col, info.a1_range.max_col
+    position: int | None = None
+    if columns:
+        folded = [name.lower() for name in info.columns]
+        width = max_col - min_col + 1
+        positions: list[int] = []
+        for column in columns:
+            found = folded.index(column.lower()) if column.lower() in folded else None
+            if found is None or found >= width:
+                collector.gap(
+                    text,
+                    UnresolvedReason.OUT_OF_RANGE,
+                    f"table {info.name!r} has no column {column!r}",
+                )
+                return
+            positions.append(found)
+        min_col, max_col = min_col + min(positions), min_col + max(positions)
+        position = positions[0] if min(positions) == max(positions) else None
+
     a1 = f"{column_letter(min_col)}{min_row}:{column_letter(max_col)}{max_row}"
-    if min_col != max_col:
+    if position is not None and not this_row and specials <= {"#data", "#this row"}:
+        # The column's data rows: the table-column node, the same whichever form named it.
         collector.edge(
-            range_node_id(context.workbook_id, context.version, info.sheet_name, a1),
+            table_column_node_id(
+                context.workbook_id,
+                context.version,
+                info.sheet_name,
+                info.name,
+                info.columns[position],
+            ),
             info.sheet_name,
             a1,
-            ReferenceKind.RANGE,
+            ReferenceKind.TABLE_COLUMN,
             True,
             (min_row, max_row, min_col, max_col),
         )
         return
-    collector.edge(
-        table_column_node_id(
-            context.workbook_id,
-            context.version,
-            info.sheet_name,
-            info.name,
-            info.columns[positions[0]],
-        ),
-        info.sheet_name,
-        a1,
-        ReferenceKind.TABLE_COLUMN,
-        True,
-        (min_row, max_row, min_col, max_col),
-    )
+    # `#This Row` moves with the formula, so a cluster of calculated-column cells broadens it to
+    # the cluster's rows; every other band is fixed.
+    collector.rectangle(info.sheet_name, A1Range.parse(info.sheet_name, a1), not this_row)
 
 
 def _resolve_on_sheet(collector: _Collector, text: str, sheet: str, ref: str) -> bool:
@@ -487,6 +524,10 @@ def _resolve_name(
                 defined.a1_range.max_col,
             ),
         )
+        return
+    if sheet is None and (context.tables.get(name) or context.tables.get(name.lower())):
+        # A bare table name reads the table's data, as `Sales[]` does.
+        _resolve_table(collector, text, name, "")
         return
     if binds_names:
         # Inside LET/LAMBDA a bare identifier is a local variable; the formula is already a gap.
@@ -612,10 +653,16 @@ def _resolve_three_d(collector: _Collector, text: str, sheet_part: str, ref: str
             return
 
 
-def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
-    """Parse one formula into typed edges and explicit gaps. Pure text analysis; no evaluation."""
+def parse_formula(
+    formula: str, context: FormulaContext, *, row: int | None = None
+) -> ParsedFormula:
+    """Parse one formula into typed edges and explicit gaps. Pure text analysis; no evaluation.
+
+    ``row`` is the row the formula sits on; a ``#This Row`` structured reference reads that row of
+    its table, and without it, the column's data rows.
+    """
     text = formula[1:] if formula.startswith("=") else formula
-    collector = _Collector(context)
+    collector = _Collector(context, row)
 
     # Spill and implicit-intersection operators are judged on the text outside string literals.
     outside_strings = _blank(text, [match.span() for match in _STRING_RE.finditer(text)])
@@ -704,6 +751,15 @@ def _blank_out(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(pieces)
 
 
+#: A defined name's target: a sheet, then a cell/rectangle, whole columns or whole rows.
+_NAMED_TARGET_RE = re.compile(
+    r"(?:'(?P<q>(?:[^']|'')+)'|(?P<s>[A-Za-z_][A-Za-z0-9_. ]*))!(?P<body>"
+    r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?"
+    r"|\$?[A-Za-z]{1,3}:\$?[A-Za-z]{1,3}"
+    r"|\$?\d{1,7}:\$?\d{1,7})"
+)
+
+
 def resolve_named_range(
     raw_name: str,
     attr_text: str | None,
@@ -712,8 +768,14 @@ def resolve_named_range(
     workbook_id: str,
     version: int,
     known_sheets: frozenset[str],
+    sheet_max_row: Mapping[str, int] | None = None,
+    sheet_max_col: Mapping[str, int] | None = None,
 ) -> NamedRange:
-    """Resolve one defined name into a :class:`NamedRange`, or a kept gap if not a rectangle."""
+    """Resolve one defined name into a :class:`NamedRange`, or a kept gap if not a rectangle.
+
+    A name over whole columns (``Data!$A:$A``) or whole rows (``Data!$2:$2``) is clipped to the
+    sheet's used extent, as a formula's ``A:A`` is.
+    """
     node = named_range_node_id(workbook_id, version, raw_name, scope_sheet)
     scope = scope_sheet
     if not attr_text:
@@ -721,16 +783,13 @@ def resolve_named_range(
     candidate = attr_text.strip()
     if candidate.startswith("="):
         candidate = candidate[1:].strip()
-    reference = re.fullmatch(
-        r"(?:'(?P<q>[^']+)'|(?P<s>[A-Za-z_][A-Za-z0-9_. ]*))!\$?[A-Za-z]{1,3}\$?\d{1,7}"
-        r"(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?",
-        candidate,
-    )
+    reference = _NAMED_TARGET_RE.fullmatch(candidate)
     if reference is None:
         return NamedRange(
             raw_name, scope, None, None, node, False, None, f"not a static rectangle: {attr_text!r}"
         )
-    sheet_name = (reference.group("q") or reference.group("s") or "").strip()
+    quoted = reference.group("q")
+    sheet_name = (quoted.replace("''", "'") if quoted is not None else reference.group("s")).strip()
     if sheet_name not in known_sheets:
         return NamedRange(
             raw_name,
@@ -742,7 +801,17 @@ def resolve_named_range(
             None,
             f"points at unknown sheet {sheet_name!r}",
         )
-    body = candidate.split("!", 1)[1]
+    body = reference.group("body").replace("$", "")
+    first, _, last = body.partition(":")
+    if first.isalpha() and last.isalpha():
+        first, last = sorted(
+            (first.upper(), last.upper()), key=lambda letters: (len(letters), letters)
+        )
+        body = f"{first}1:{last}{(sheet_max_row or {}).get(sheet_name, 1)}"
+    elif first.isdigit() and last.isdigit():
+        low, high = sorted((int(first), int(last)))
+        width = (sheet_max_col or {}).get(sheet_name, 1)
+        body = f"A{low}:{column_letter(width)}{high}"
     try:
         parsed = A1Range.parse(sheet_name, body)
     except ValueError as exc:

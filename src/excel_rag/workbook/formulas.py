@@ -4,8 +4,9 @@ A formula is turned into typed :class:`~excel_rag.models.Reference` edges by tex
 Two inviolable rules from the design:
 
 * **Never invent an edge.** A precedent that cannot be determined statically (``INDIRECT``, volatile
-  ``OFFSET``, an external workbook, an unsupported dynamic array) becomes an
-  :class:`~excel_rag.models.UnresolvedReference` carrying the reason, not a guessed target.
+  ``OFFSET``, an external workbook, a user-defined function, a spill with no saved extent)
+  becomes an :class:`~excel_rag.models.UnresolvedReference` carrying the reason, not a guessed
+  target.
 * **Edges point at ranges, not cells.** ``SUM(Actuals!D2:D500)`` is *one* range edge; the rectangle
   is indexed once and overlaps are answered by an ``integer_range`` query at retrieval time.
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from openpyxl.formula.tokenizer import (  # type: ignore[import-untyped]
     Token,
@@ -62,44 +64,6 @@ _TABLE_REF_RE = re.compile(r"(?P<table>[A-Za-z_\\][A-Za-z0-9_.]*)?\s*\[(?P<spec>
 _NAME_RE = re.compile(r"[A-Za-z_\\][A-Za-z0-9_.]*")
 #: Functions that bind local names; inside them a bare identifier is a variable, not a name.
 _BINDING_FUNCTIONS = frozenset({"LET", "LAMBDA"})
-
-#: Functions whose result is a dynamic array: they cannot be flattened to static edges.
-_DYNAMIC_FUNCTIONS = frozenset(
-    {
-        "LET",
-        "LAMBDA",
-        "SEQUENCE",
-        "FILTER",
-        "SORT",
-        "SORTBY",
-        "UNIQUE",
-        "RANDARRAY",
-        "XMATCH",
-        "TAKE",
-        "DROP",
-        "HSTACK",
-        "VSTACK",
-        "TOROW",
-        "TOCOL",
-        "WRAPROWS",
-        "WRAPCOLS",
-        "EXPAND",
-        "CHOOSECOLS",
-        "CHOOSEROWS",
-        "MAP",
-        "REDUCE",
-        "SCAN",
-        "BYROW",
-        "BYCOL",
-        "MAKEARRAY",
-        "TEXTSPLIT",
-        "TEXTBEFORE",
-        "TEXTAFTER",
-        "GROUPBY",
-        "PIVOTBY",
-        "SINGLE",
-    }
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,22 +180,27 @@ def _function_gaps(raw_name: str) -> list[UnresolvedReference]:
                 "substituted; only the input cells are edges",
             )
         ]
-    if base in _DYNAMIC_FUNCTIONS:
+    if base == "SINGLE":
+        # How Excel stores the implicit-intersection `@` on disk.
         return [
             _gap(
                 f"{raw_name}(...)",
                 UnresolvedReason.DYNAMIC_ARRAY,
-                "dynamic-array formula; precedents cannot be flattened to static edges",
+                "implicit intersection: which cell of its argument it reads depends on the "
+                "formula's position",
             )
         ]
-    if upper.startswith(("_XLFN.", "_XLUDF.")):
+    if upper.startswith("_XLUDF."):
         return [
             _gap(
                 f"{raw_name}(...)",
                 UnresolvedReason.UNSUPPORTED_FUNCTION,
-                "function form is not supported for static reference extraction",
+                "user-defined function: it may read cells its arguments do not name",
             )
         ]
+    # Any other function -- including the dynamic-array ones (FILTER, SORT, LET, LAMBDA, MAP...)
+    # and the `_xlfn.` built-ins newer than Excel 2007 -- reads what its arguments name, and every
+    # argument is resolved on its own; only its result's extent is decided at calculation.
     return []
 
 
@@ -503,7 +472,6 @@ def _resolve_name(
     text: str,
     name: str,
     *,
-    binds_names: bool,
     sheet: str | None = None,
 ) -> None:
     context = collector.context
@@ -529,9 +497,6 @@ def _resolve_name(
         # A bare table name reads the table's data, as `Sales[]` does.
         _resolve_table(collector, text, name, "")
         return
-    if binds_names:
-        # Inside LET/LAMBDA a bare identifier is a local variable; the formula is already a gap.
-        return
     collector.gap(
         text,
         UnresolvedReason.OUT_OF_RANGE,
@@ -539,7 +504,7 @@ def _resolve_name(
     )
 
 
-def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> None:
+def _resolve_operand(collector: _Collector, raw: str, *, bound: frozenset[str]) -> None:
     context = collector.context
     text = raw.strip()
     if text.startswith("@"):
@@ -561,9 +526,11 @@ def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> N
 
     qualified = _SHEET_REF_RE.fullmatch(text)
     if qualified is None:
+        if text.lower() in bound or text.lower().startswith("_xlpm."):
+            return  # a LET variable or LAMBDA parameter, not a cell or a workbook name
         if not _resolve_on_sheet(collector, text, context.sheet_name, text):
             if _NAME_RE.fullmatch(text):
-                _resolve_name(collector, text, text, binds_names=binds_names)
+                _resolve_name(collector, text, text)
             else:
                 collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
         return
@@ -595,7 +562,7 @@ def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> N
     if not _resolve_on_sheet(collector, text, sheet_part, ref):
         if _NAME_RE.fullmatch(ref):
             # A sheet-scoped defined name: `Inputs!Rate`.
-            _resolve_name(collector, text, ref, binds_names=binds_names, sheet=sheet_part)
+            _resolve_name(collector, text, ref, sheet=sheet_part)
         else:
             collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
 
@@ -653,6 +620,46 @@ def _resolve_three_d(collector: _Collector, text: str, sheet_part: str, ref: str
             return
 
 
+def _bound_names(tokens: list[Token]) -> frozenset[str]:
+    """The variables a formula's ``LET`` and ``LAMBDA`` calls bind, lowercased.
+
+    ``LET(name1, value1, ..., calculation)`` binds each name in an even argument position but the
+    last; ``LAMBDA(param1, ..., calculation)`` binds every argument but the last. A binding is an
+    operand alone in its argument, followed by a separator -- so the calculation, which is last
+    and closes the call, never binds.
+    """
+    significant = [token for token in tokens if token.type != Token.WSPACE]
+    stack: list[list[Any]] = []  # [function name or "(", argument index]
+    bound: set[str] = set()
+    for index, token in enumerate(significant):
+        if token.subtype == Token.OPEN and token.type in (Token.FUNC, Token.PAREN):
+            name = (
+                token.value[:-1].strip().upper().rsplit(".", 1)[-1]
+                if token.type == Token.FUNC
+                else "("
+            )
+            stack.append([name, 0])
+        elif token.subtype == Token.CLOSE and token.type in (Token.FUNC, Token.PAREN):
+            if stack:
+                stack.pop()
+        elif token.type == Token.SEP and token.subtype == Token.ARG:
+            if stack:
+                stack[-1][1] += 1
+        elif token.type == Token.OPERAND and token.subtype == Token.RANGE and stack:
+            function, position = stack[-1]
+            if function not in _BINDING_FUNCTIONS:
+                continue
+            before = significant[index - 1]
+            after = significant[index + 1] if index + 1 < len(significant) else None
+            alone = (before.type == Token.FUNC and before.subtype == Token.OPEN) or (
+                before.type == Token.SEP and before.subtype == Token.ARG
+            )
+            followed = after is not None and after.type == Token.SEP and after.subtype == Token.ARG
+            if alone and followed and (function == "LAMBDA" or position % 2 == 0):
+                bound.add(token.value.strip().lower())
+    return frozenset(bound)
+
+
 def parse_formula(
     formula: str, context: FormulaContext, *, row: int | None = None
 ) -> ParsedFormula:
@@ -693,12 +700,7 @@ def parse_formula(
         )
         return ParsedFormula(references=(), unresolved=tuple(collector.unresolved))
 
-    binds_names = any(
-        token.type == Token.FUNC
-        and token.subtype == Token.OPEN
-        and token.value[:-1].strip().upper().rsplit(".", 1)[-1] in _BINDING_FUNCTIONS
-        for token in tokens
-    )
+    bound = _bound_names(tokens)
     for index, token in enumerate(tokens):
         if token.type == Token.FUNC and token.subtype == Token.OPEN:
             name = token.value[:-1].strip()
@@ -730,7 +732,7 @@ def parse_formula(
                 continue
             collector.unresolved.extend(_function_gaps(name))
         elif token.type == Token.OPERAND and token.subtype == Token.RANGE:
-            _resolve_operand(collector, token.value, binds_names=binds_names)
+            _resolve_operand(collector, token.value, bound=bound)
         elif token.type == Token.OPERAND and token.subtype == Token.ERROR:
             if token.value.upper() == "#REF!":
                 collector.gap(token.value, UnresolvedReason.MALFORMED, "broken reference (#REF!)")

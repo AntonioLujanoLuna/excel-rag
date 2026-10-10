@@ -186,8 +186,8 @@ cannot be resolved statically becomes an `UnresolvedReference` with the right re
 | `INDIRECT(...)` | `indirect` |
 | `OFFSET(...)` | `volatile_offset` |
 | `[Budget.xlsx]…`, `'…[Book.xlsx]Sheet'!A1`, `[1]…` | `external_link` |
-| `LET`, `LAMBDA`, `@`, dynamic-array functions; a spill `#` (`ANCHORARRAY` on disk) from a cell with no saved array extent | `dynamic_array` |
-| `_xlfn.`/`_xludf.` forms; a range bounded by a function (`A1:INDEX(…)`) | `unsupported_function` |
+| `@` (`_xlfn.SINGLE` on disk); a spill `#` (`ANCHORARRAY` on disk) from a cell with no saved array extent | `dynamic_array` |
+| a user-defined function (`_xludf.`); a range bounded by a function (`A1:INDEX(…)`); a what-if `TABLE` | `unsupported_function` |
 | reference to a macro sheet | `macro_sheet` |
 | unknown sheet, table, column or name; a 3-D ref with unknown sheet order | `out_of_range` |
 | `#REF!`, a range across two sheets, a formula the tokenizer refuses | `malformed` |
@@ -204,8 +204,13 @@ read from the table definition):
 | `Sales[#All]`; `Sales[]` or a bare `Sales` | the whole rectangle; the data rows of every column |
 | `Sales[@Amount]`, `Sales[[#This Row],[Amount]]` | the cell in the formula's own row; a calculated column clusters into one edge over its rows |
 
-Inside `LET`/`LAMBDA` a bare identifier is a local variable, so it is not reported as an unknown name
-(the formula already carries its `dynamic_array` gap).
+Any other function reads what its arguments name, and each argument is resolved on its own — so
+`FILTER`, `SORT`, `XLOOKUP`, `MAP`, `LET`, `LAMBDA` and every `_xlfn.` built-in newer than Excel
+2007 add no gap: their precedents are complete, and only a dynamic array's *result extent* is
+decided at calculation (its last saved extent is kept, see above). A `LET` or `LAMBDA` variable
+(`_xlpm.` on disk) is worked out from its argument position, so it is neither an unknown name nor
+an edge to a workbook name it happens to share a spelling with: in `LET(rate, 0.1, rate*A1)`,
+`rate` is not the workbook's `Rate`.
 
 A string literal is never scanned for references (`=IF(A1="B2",…)` yields only the `A1` edge), and
 duplicate edges are collapsed. Edges point at ranges, not cells.

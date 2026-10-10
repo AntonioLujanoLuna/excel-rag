@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .context import ToolInputError, WorkbookSession, render_workbook
+from .workbook.calc import calculation_available
 from .workbook.errors import WorkbookError
 
 if TYPE_CHECKING:
@@ -119,9 +120,11 @@ def build_server(
     roots: Sequence[str | Path],
     *,
     search_service: Callable[[], RetrievalService] | None = None,
+    calculate: bool | None = None,
 ) -> Any:
     """Build the MCP server over ``roots``; with ``search_service``, also the ``search_index``
-    tool (the factory is called per search, so the service can be built lazily)."""
+    tool (the factory is called per search, so the service can be built lazily). ``calculate``
+    (formula evaluation) is served when the ``calc`` extra is installed, unless it is ``False``."""
     try:
         from mcp.server.mcpserver import MCPServer
         from mcp.server.mcpserver.exceptions import ToolError
@@ -131,13 +134,20 @@ def build_server(
 
     catalog = WorkbookCatalog(roots)
     read_only = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
+    offer_calculate = calculation_available() if calculate is None else calculate
+    recalculation = (
+        "Formula cells show the value Excel last saved; calculate computes cells under changed "
+        "inputs (a what-if), marking what it recomputed. Files are never modified"
+        if offer_calculate
+        else "Formula cells show the value Excel last saved; nothing is recalculated"
+    )
     server = MCPServer(
         "excel-rag",
         instructions=(
             "Tools over Excel workbooks in the directories this server was given. Start with "
             "list_workbooks or render_workbook for an overview, then read_range, find, "
-            "precedents and dependents for detail. Formula cells show the value Excel last "
-            "saved; nothing is recalculated and no macro runs. Cite cells as Sheet!A1."
+            f"precedents and dependents for detail. {recalculation}, and no macro runs. Cite "
+            "cells as Sheet!A1."
         ),
     )
 
@@ -195,6 +205,19 @@ def build_server(
         """List the formulas, charts, pivot tables and data validations anywhere in the workbook
         that read any cell of the range: what changes if this input changes."""
         return answer(lambda: catalog.session(path).dependents(sheet, range))
+
+    if offer_calculate:
+
+        @server.tool(name="calculate", annotations=read_only)
+        def calculate_cells(
+            path: str, sheet: str, range: str, changes: dict[str, str] | None = None
+        ) -> str:
+            """Compute a range's cells, optionally after changing inputs: changes maps a cell
+            (Assumptions!B4) to its value as typed (0.07, 7%, TRUE, text). Formulas no change
+            reaches keep Excel's saved value; recomputed ones are marked, and what cannot be
+            computed (INDIRECT, OFFSET, circular references) is reported unknown with the
+            reason. Nothing is written to the file; every call starts from it as saved."""
+            return answer(lambda: catalog.session(path).calculate(sheet, range, changes or {}))
 
     @server.tool(name="diff_workbooks", annotations=read_only)
     def diff_versions(before: str, after: str, max_changes: int = 200) -> str:

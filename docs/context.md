@@ -4,8 +4,8 @@ Indexing is for a corpus that is searched again and again. A workbook attached t
 needs none of it: no Elasticsearch, no embeddings, nothing persisted. `excel_rag.context` turns the
 workbook into text for the context window and gives the model tools to read whatever that text left
 out. It shares the reading and modelling layer (`excel_rag.workbook`) with ingestion, so an
-attachment gets the same guarantees: macros are never run, external links never refreshed, formulas
-never evaluated, and a hostile package is refused.
+attachment gets the same guarantees: macros are never run, external links never refreshed, a hostile
+package is refused, and a formula is evaluated only when the `calculate` tool is asked to.
 
 ```python
 from excel_rag.context import WorkbookSession, render_workbook
@@ -77,11 +77,50 @@ Messages API's `count_tokens` endpoint for the model you will call.
 | `read_range(sheet, range)` | a grid of the rectangle, with the formulas inside it; at most 2,000 cells, cut by rows with the next range named |
 | `find(query)` | cells (value or formula) and named ranges containing the text; at most 50 matches, with the total |
 | `precedents(sheet, range)` | the formulas in the range, their saved values and what they read, with single-cell precedents' values; a chart, pivot table or validation in the range, with what it reads |
+| `calculate(sheet, range, changes)` | the range's values, after setting `changes` (cell → value as typed); with the `calc` extra — see below |
 | `dependents(sheet, range)` | the formulas, charts, pivot tables and data validations anywhere that read any cell of the range — `D100` finds a formula reading `D2:D500` |
 
 The definitions are plain dicts in the Messages API shape with `strict: true` and every field
 required. A bad call (unknown sheet, malformed range, extra argument) is returned as a
 `tool_result` with `is_error: true` and a message the model can correct from, never an exception.
+
+## Calculating (what-if)
+
+`excel_rag.workbook.calc` (the `calc` extra; `excel-rag calc`, the `calculate` tool) computes cells,
+optionally after changing inputs. It never writes the file, and each call starts from the workbook
+as saved.
+
+- **Excel's values wherever they still hold.** Which formulas a change reaches is decided per cell
+  from what each formula reads; every other formula keeps the value Excel saved (`saved`). Reached
+  ones are recomputed (`recalculated`) and shown beside Excel's saved value. A workbook saved
+  without values (written by a script) is computed throughout. `--check` / `check_saved_values`
+  recomputes everything and lists where excel-rag and Excel disagree.
+- **How a formula is computed.** Its references are resolved by this package — structured table
+  references, defined names, `LET` variables, spill references to their saved extent — and the
+  formula is compiled by [`formulas`](https://pypi.org/project/formulas/), which builds a function
+  graph from the text (no generated Python is executed), with each distinct reference as a
+  placeholder so a filled-down column compiles once. Plain arithmetic over cells (`+ - * / ^ %`)
+  takes a faster path of its own with Excel's precedence and errors (`-2^2` is 4, `0^0` is `#NUM!`).
+- **Unknown, with the reason.** `INDIRECT`, `OFFSET`, a user-defined function, a what-if data
+  table, a 3-D reference, a function `formulas` lacks: these cannot be recomputed, so when a change
+  might reach one (for `INDIRECT`/`OFFSET`, any change might) its value is `unknown`, and so is
+  everything computed from it. Circular references are reported, not iterated. A volatile cell
+  (`NOW`, `RAND`) is computed as of now and named.
+- **Bounded.** 100,000 formula evaluations, 1,000,000 cells per range input, 30 s; a stop is
+  reported and the cells it did not reach are unknown. A 50,000-row running balance recomputes in
+  about 9 s; a change that reaches a handful of cells answers in well under a second.
+
+```text
+$ excel-rag calc model.xlsx "'Model Sheet'!A1:A5" --set Inputs!B2=20
+With Inputs!B2 = 20:
+- 'Model Sheet'!A1: 80 (recalculated; Excel saved 40)
+- 'Model Sheet'!A2: 88 (recalculated; Excel saved 44)
+- 'Model Sheet'!A3: 2026 (saved)
+- 'Model Sheet'!A4: 160 (recalculated; Excel saved 80)
+- 'Model Sheet'!A5: unknown (Excel last saved 11) -- it reads Inputs!B5, which is unknown (it uses
+  INDIRECT(...): INDIRECT target depends on a runtime string; not statically resolvable)
+3 formula evaluation(s) by excel-rag; 'saved' values are Excel's own, which no change reaches.
+```
 
 ## Comparing two versions
 

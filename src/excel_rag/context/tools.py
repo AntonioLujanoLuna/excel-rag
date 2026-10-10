@@ -20,6 +20,13 @@ from typing import Any
 
 from ..models import A1Range
 from ..workbook import WorkbookModel, load_workbook
+from ..workbook.calc import (
+    CalcInputError,
+    CalcUnavailable,
+    calculate,
+    calculation_available,
+    format_calculation,
+)
 from ..workbook.canonical import FormulaEntry, SheetModel, SheetObject, column_letter
 from .render import (
     DETAIL_LADDER,
@@ -114,6 +121,47 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
     },
 )
 
+#: The what-if tool, offered only when the ``calc`` extra (formula evaluation) is installed.
+CALCULATE_DEFINITION: dict[str, Any] = {
+    "name": "calculate",
+    "description": (
+        "Compute the cells of a range in the attached workbook, optionally after changing input "
+        "cells (a what-if: 'what is net income if growth is 7%?'). Formulas no change reaches "
+        "keep the value Excel saved (marked saved); those a change reaches are recomputed by "
+        "excel-rag, not by Excel, and marked recalculated with Excel's saved value beside them. "
+        "A value that cannot be computed - INDIRECT, OFFSET, a user-defined function, a circular "
+        "reference - is reported unknown with the reason, never guessed. Changes are not kept: "
+        "every call starts from the workbook as saved, so pass all the changes a scenario needs "
+        f"at once. Computes at most {MAX_RANGE_CELLS} cells."
+    ),
+    "input_schema": _schema(
+        {
+            "sheet": _SHEET,
+            "range": _RANGE,
+            "changes": {
+                "type": "array",
+                "description": "Input cells to set before computing; empty for none.",
+                "items": _schema(
+                    {
+                        "cell": {
+                            "type": "string",
+                            "description": "The cell with its sheet, e.g. Assumptions!B4.",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": (
+                                "Its new value as typed into Excel: 0.07, 7%, 1200, TRUE, "
+                                "text, or empty to clear it. Not a formula."
+                            ),
+                        },
+                    }
+                ),
+            },
+        }
+    ),
+    "strict": True,
+}
+
 
 @dataclass(frozen=True)
 class ToolOutcome:
@@ -140,9 +188,16 @@ class WorkbookSession:
 
     # -- tool plumbing ----------------------------------------------------------------------
     @staticmethod
-    def tool_definitions() -> list[dict[str, Any]]:
-        """The tool definitions to pass as ``tools`` in a Messages API request."""
-        return [dict(definition) for definition in TOOL_DEFINITIONS]
+    def tool_definitions(*, calculate: bool | None = None) -> list[dict[str, Any]]:
+        """The tool definitions to pass as ``tools`` in a Messages API request.
+
+        ``calculate`` (formula evaluation) is included when the ``calc`` extra is installed,
+        unless ``calculate=False``.
+        """
+        definitions = [dict(definition) for definition in TOOL_DEFINITIONS]
+        if calculate if calculate is not None else calculation_available():
+            definitions.append(dict(CALCULATE_DEFINITION))
+        return definitions
 
     def call(self, name: str, tool_input: Any) -> ToolOutcome:
         """Run one tool call. A bad call is an ``is_error`` outcome, never an exception."""
@@ -154,6 +209,9 @@ class WorkbookSession:
                 return ToolOutcome(self.find(arguments["query"]))
             if name == "precedents":
                 return ToolOutcome(self.precedents(arguments["sheet"], arguments["range"]))
+            if name == "calculate":
+                changes = _changes(tool_input.get("changes"))
+                return ToolOutcome(self.calculate(arguments["sheet"], arguments["range"], changes))
             return ToolOutcome(self.dependents(arguments["sheet"], arguments["range"]))
         except ToolInputError as error:
             return ToolOutcome(f"Error: {error}", is_error=True)
@@ -323,6 +381,20 @@ class WorkbookSession:
                 lines.append(f"({len(readers) - MAX_FORMULAS} more not shown.)")
         return "\n".join(lines)
 
+    def calculate(self, sheet_name: str, a1: str, changes: Mapping[str, str] | None = None) -> str:
+        """The range's values, computed under ``changes`` (cell -> value as typed)."""
+        sheet = self._sheet(sheet_name)
+        region = _parse(sheet.name, a1)
+        if region.cell_count > MAX_RANGE_CELLS:
+            raise ToolInputError(
+                f"{region.cell_count} cells is more than {MAX_RANGE_CELLS}; ask for a smaller range"
+            )
+        try:
+            calculation = calculate(self.model, _qualified(sheet.name, region.a1), changes or {})
+        except (CalcInputError, CalcUnavailable) as error:
+            raise ToolInputError(str(error)) from error
+        return format_calculation(calculation)
+
     # -- helpers ----------------------------------------------------------------------------
     def _sheet(self, name: str) -> SheetModel:
         sheet = self._sheets.get(name)
@@ -351,15 +423,18 @@ class WorkbookSession:
 
 
 def _arguments(name: str, tool_input: Any) -> dict[str, str]:
-    definition = next((item for item in TOOL_DEFINITIONS if item["name"] == name), None)
+    definitions = (*TOOL_DEFINITIONS, CALCULATE_DEFINITION)
+    definition = next((item for item in definitions if item["name"] == name), None)
     if definition is None:
-        known = ", ".join(item["name"] for item in TOOL_DEFINITIONS)
+        known = ", ".join(item["name"] for item in definitions)
         raise ToolInputError(f"unknown tool {name!r}; the tools are {known}")
     if not isinstance(tool_input, Mapping):
         raise ToolInputError("the tool input must be a JSON object")
     required: Sequence[str] = definition["input_schema"]["required"]
     arguments: dict[str, str] = {}
     for key in required:
+        if key == "changes":
+            continue  # a list, checked by _changes
         value = tool_input.get(key)
         if not isinstance(value, str) or not value.strip():
             raise ToolInputError(f"{name} needs a non-empty string {key!r}")
@@ -394,7 +469,23 @@ def _reads(reference: Any, region: A1Range) -> bool:
     )
 
 
+def _changes(raw: Any) -> dict[str, str]:
+    """The ``changes`` argument as cell -> value, or a correctable error."""
+    if not isinstance(raw, list):
+        raise ToolInputError("calculate needs 'changes', a list of {cell, value} (empty for none)")
+    changes: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, Mapping) or set(item) != {"cell", "value"}:
+            raise ToolInputError("each change is an object with exactly 'cell' and 'value'")
+        cell, value = item["cell"], item["value"]
+        if not isinstance(cell, str) or not cell.strip() or not isinstance(value, str):
+            raise ToolInputError("a change's 'cell' and 'value' are strings, the cell non-empty")
+        changes[cell.strip()] = value
+    return changes
+
+
 __all__ = [
+    "CALCULATE_DEFINITION",
     "MAX_FORMULAS",
     "MAX_MATCHES",
     "MAX_RANGE_CELLS",

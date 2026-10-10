@@ -6,7 +6,9 @@ window. Everything here is pure: openpyxl reading with the macro, link, zip-bomb
 guards (:mod:`.reader`), region and header detection (:mod:`.regions`), static formula references
 (:mod:`.formulas`), and the assembled :class:`WorkbookModel` (:mod:`.build`).
 
-Nothing here evaluates a formula, executes a macro or refreshes an external link.
+Nothing here executes a macro or refreshes an external link, and reading never evaluates a formula:
+values are what Excel saved. Evaluation happens only on request, in :mod:`.calc` (the ``calc``
+extra), and its results are labelled as computed.
 """
 
 from __future__ import annotations

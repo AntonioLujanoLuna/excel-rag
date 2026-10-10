@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 
+from excel_rag.workbook.calc import calculation_available
+
 _SPEC = importlib.util.spec_from_file_location(
     "ask_workbook", Path(__file__).parents[2] / "examples" / "ask_workbook.py"
 )
@@ -70,6 +72,7 @@ def test_tool_calls_are_answered_then_the_answer_is_returned(fixtures) -> None:
         "find",
         "precedents",
         "dependents",
+        *(["calculate"] if calculation_available() else []),
     ]
     workbook_block = first["messages"][0]["content"][0]
     assert workbook_block["text"].startswith("<workbook>\n# Workbook: ")

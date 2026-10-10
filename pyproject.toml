@@ -34,6 +34,11 @@ mcp = [
 xlsb = [
     "pyxlsb>=1.0.10",
 ]
+# Formula evaluation on request (`excel-rag calc`, the `calculate` tool): each formula is compiled
+# by `formulas` from its text -- no generated Python is executed -- and fed the reader's values.
+calc = [
+    "formulas>=1.2,<2",
+]
 
 [project.scripts]
 excel-rag = "excel_rag.cli:main"

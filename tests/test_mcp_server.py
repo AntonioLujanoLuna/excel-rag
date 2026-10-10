@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent / "fixtures"))
 import make_fixtures as mk
 
 from excel_rag.mcp_server import PathRefused, WorkbookCatalog, build_server
+from excel_rag.workbook.calc import calculation_available
 
 
 @pytest.fixture
@@ -60,8 +61,10 @@ def test_tools_are_listed_read_only(root: Path) -> None:
         "precedents",
         "dependents",
         "diff_workbooks",
+        *(["calculate"] if calculation_available() else []),
     }
     assert all(tool.annotations.read_only_hint for tool in tools.values())
+    assert "calculate" not in _tools(build_server([root], calculate=False))
 
 
 def test_list_workbooks_names_only_workbooks(root: Path) -> None:

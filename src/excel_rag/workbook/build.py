@@ -363,8 +363,9 @@ def build_model(
                 continue
 
     sheets: list[SheetModel] = []
+    contexts: dict[str, FormulaContext] = {}
     for sheet in raw.sheets:
-        context = FormulaContext(
+        context = contexts[sheet.name] = FormulaContext(
             workbook_id=workbook_id,
             version=version,
             sheet_name=sheet.name,
@@ -410,6 +411,7 @@ def build_model(
         has_vba=raw.has_vba,
         acl_scope=tuple(acl_scope),
         warnings=raw.warnings,
+        formula_contexts=contexts,
     )
 
 

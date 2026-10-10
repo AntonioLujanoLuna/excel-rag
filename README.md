@@ -107,17 +107,36 @@ a dependent of `Actuals!D100` without one edge per cell.
 Not every workbook needs an index. `excel_rag.context` renders an attached `.xlsx` (a path or an
 upload's bytes) as markdown for a context window within a token budget — grids with row numbers and
 column letters, regions with headers, units and notes, formulas with Excel's saved values and what
-they read, every omission marked — and gives the model four tools (`read_range`, `find`,
-`precedents`, `dependents`) for what the budget left out. Same reader, same guarantees, no
+they read, every omission marked — and gives the model tools (`read_range`, `find`,
+`precedents`, `dependents`, and `calculate` with the `calc` extra) for what the budget left out. Same reader, same guarantees, no
 Elasticsearch. See [docs/context.md](docs/context.md), `excel-rag render`, and
 `examples/ask_workbook.py`. `excel-rag diff before.xlsx after.xlsx` says what changed between two
 versions — inputs, formulas, saved results — and which formulas read each changed input.
 
+## What if an input changes?
+
+`excel-rag calc` computes cells, optionally after changing inputs, with the `calc` extra:
+
+```bash
+uv sync --extra calc
+excel-rag calc budget.xlsx 'Forecast!E4:E7' --set 'Assumptions!B4=7%'
+excel-rag calc budget.xlsx --check     # recompute every formula, compare with Excel's saved values
+```
+
+Formulas no change reaches keep the value Excel saved; the ones a change reaches are recomputed and
+shown beside Excel's saved value. What cannot be computed — `INDIRECT`, `OFFSET`, a user-defined
+function, a circular reference — is reported unknown with the reason, never guessed. Each formula
+is compiled from its text by [`formulas`](https://pypi.org/project/formulas/) after this package
+resolves its references, so no generated code runs and the file is never opened by anything else.
+The same is the `calculate` tool for a model and over MCP; see
+[docs/context.md](docs/context.md#calculating-what-if).
+
 ## Using it from Claude or another MCP client
 
 `excel-rag mcp` serves the workbook tools over stdio to any MCP client: `list_workbooks`,
-`render_workbook`, `read_range`, `find`, `precedents`, `dependents` and `diff_workbooks`, on the
-`.xlsx`/`.xlsm` files under the directories given with `--root` (default: the working directory).
+`render_workbook`, `read_range`, `find`, `precedents`, `dependents`, `diff_workbooks` and (with
+the `calc` extra) `calculate`, on the `.xlsx`/`.xlsm`/`.xlsb`/`.csv` files under the directories
+given with `--root` (default: the working directory).
 Every tool is read-only, and a path outside the roots is refused. With `--search` it also serves
 `search_index`, the retrieval endpoint's search over the configured Elasticsearch.
 
@@ -145,7 +164,9 @@ For Claude Desktop, the same command goes in `claude_desktop_config.json`:
   truncated expansion says so.
 - **No cell-per-document explosion.** Large grids are bounded range and row-group nodes; a workbook
   that would exceed `max_documents_per_workbook` is refused, not silently clipped.
-- **Macros are never executed**, external links are never refreshed, formulas are never evaluated.
+- **Macros are never executed**, external links are never refreshed, and reading, indexing and
+  searching never evaluate a formula. Evaluation happens only when asked (`excel-rag calc`, the
+  `calculate` tool), and every value it computes is marked as computed, beside Excel's saved one.
 - **A cached value is not a computed value** and is labelled as such wherever it is returned.
 
 ## Quickstart
@@ -214,5 +235,5 @@ authorisation: it is unrestricted and passes the scopes it names through.
 ## Non-goals
 
 Multi-turn orchestration, agent tool selection, answer generation, feedback-based relevance
-evaluation, executing spreadsheets, SQL analytics, recalculating Excel formulas, and any additional
-persistent store.
+evaluation, executing macros, SQL analytics, recalculating formulas during ingestion or retrieval,
+and any additional persistent store.

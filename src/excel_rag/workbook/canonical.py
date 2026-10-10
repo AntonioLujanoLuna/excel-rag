@@ -16,9 +16,12 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..models import A1Range, Reference, UnresolvedReference, node_id
+
+if TYPE_CHECKING:
+    from .formulas import FormulaContext
 
 
 class RegionKind(StrEnum):
@@ -314,3 +317,8 @@ class WorkbookModel:
     has_vba: bool = False
     acl_scope: tuple[str, ...] = ()
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    #: What each sheet's formulas were resolved against (tables, names, spill extents), so a formula
+    #: can be resolved again later the same way -- by the evaluator, which rewrites references.
+    formula_contexts: Mapping[str, FormulaContext] = field(
+        default_factory=dict, compare=False, repr=False
+    )

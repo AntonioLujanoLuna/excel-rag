@@ -20,6 +20,7 @@ from .render import (
     render_workbook,
 )
 from .tools import (
+    CALCULATE_DEFINITION,
     MAX_FORMULAS,
     MAX_MATCHES,
     MAX_RANGE_CELLS,
@@ -30,6 +31,7 @@ from .tools import (
 )
 
 __all__ = [
+    "CALCULATE_DEFINITION",
     "DETAIL_LADDER",
     "FORMULA_MARK",
     "MAX_FORMULAS",

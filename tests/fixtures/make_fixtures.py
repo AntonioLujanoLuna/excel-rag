@@ -561,3 +561,62 @@ def sheet_objects(directory: Path) -> Path:
     path = directory / "sheet_objects.xlsx"
     wb.save(path)
     return path
+
+
+def calc_model(directory: Path) -> Path:
+    """A small model with Excel's saved values, for formula evaluation.
+
+    ``Inputs``: Rate (B1, the name ``Rate``), Units (B2), Price (B3), Start date (B4), an
+    ``INDIRECT`` (B5) and the ``Sales`` table (D1:E4). ``Model Sheet``: formulas over them -- plain,
+    named, dated, ``LET`` as Excel stores it, through ``INDIRECT`` and ``OFFSET``, a circular pair,
+    ``NOW()``, a structured reference, a user-defined function -- each with the value Excel saved.
+    """
+    from datetime import date
+
+    wb = openpyxl.Workbook()
+    inputs = wb.active
+    inputs.title = "Inputs"
+    for row, (label, value) in enumerate(
+        [("Rate", 0.1), ("Units", 10), ("Price", 4), ("Start", date(2026, 1, 1))], start=1
+    ):
+        inputs.cell(row=row, column=1, value=label)
+        inputs.cell(row=row, column=2, value=value)
+    inputs["A5"], inputs["B5"] = "Indirect units", '=INDIRECT("B2")'
+    inputs.append([])
+    for row, (region, amount) in enumerate(
+        [("Region", "Amount"), ("North", 10), ("South", 20), ("East", 30)], start=1
+    ):
+        inputs.cell(row=row, column=4, value=region)
+        inputs.cell(row=row, column=5, value=amount)
+    inputs.add_table(Table(displayName="Sales", ref="D1:E4"))
+    wb.defined_names["Rate"] = DefinedName("Rate", attr_text="Inputs!$B$1")
+
+    model = wb.create_sheet("Model Sheet")
+    formulas = {
+        "A1": ("=Inputs!B2*Inputs!B3", "40"),
+        "A2": ("=A1*(1+Rate)", "44"),
+        "A3": ("=YEAR(Inputs!B4)", "2026"),
+        "A4": ("=_xlfn.LET(_xlpm.x,A1,_xlpm.x*2)", "80"),
+        "A5": ("=Inputs!B5+1", "11"),
+        "A6": ("=NOW()", "46000"),
+        "A7": ("=A8+1", "1"),
+        "A8": ("=A7+1", "2"),
+        "A9": ("=OFFSET(A1,0,0)", "40"),
+        "A10": ("=SUM(Sales[Amount])", "60"),
+        "A11": ("=_xludf.MYFN(A1)", "7"),
+        "A12": ("=2+3", "5"),
+    }
+    for coordinate, (formula, _saved) in formulas.items():
+        model[coordinate] = formula
+    base = directory / "calc_model_base.xlsx"
+    wb.save(base)
+    return _rewrite_zip(
+        base,
+        directory / "calc_model.xlsx",
+        edits={
+            "xl/worksheets/sheet1.xml": _excel_saved_values({"B5": "10"}),
+            "xl/worksheets/sheet2.xml": _excel_saved_values(
+                {coordinate: saved for coordinate, (_formula, saved) in formulas.items()}
+            ),
+        },
+    )

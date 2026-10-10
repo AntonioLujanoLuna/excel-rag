@@ -107,6 +107,54 @@ def _diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _calc(args: argparse.Namespace) -> int:
+    from .workbook import load_workbook
+    from .workbook.calc import (
+        CalcInputError,
+        CalcUnavailable,
+        calculate,
+        check_saved_values,
+        format_calculation,
+        format_check,
+    )
+
+    changes: dict[str, str] = {}
+    for item in args.set:
+        cell, sep, value = item.partition("=")
+        if not sep or not cell.strip():
+            print(f"excel-rag calc: --set wants CELL=VALUE, got {item!r}", file=sys.stderr)
+            return 2
+        changes[cell.strip()] = value
+    if not args.targets and not args.check:
+        print("excel-rag calc: name the cells to calculate, or pass --check", file=sys.stderr)
+        return 2
+    try:
+        model = load_workbook(args.path)
+        if args.check:
+            calculation = check_saved_values(model, timeout_seconds=args.timeout)
+        else:
+            calculation = calculate(
+                model,
+                args.targets,
+                changes,
+                recalculate_all=args.all,
+                timeout_seconds=args.timeout,
+            )
+    except CalcUnavailable as error:
+        print(f"excel-rag calc: {error}", file=sys.stderr)
+        return 1
+    except CalcInputError as error:
+        print(f"excel-rag calc: {error}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(asdict(calculation), indent=2, sort_keys=True, default=str))
+    elif args.check:
+        print(format_check(calculation))
+    else:
+        print(format_calculation(calculation))
+    return 3 if args.check and calculation.mismatches else 0
+
+
 def _mcp(args: argparse.Namespace) -> int:
     try:
         from .mcp_server import run
@@ -163,6 +211,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-changes", type=int, default=500, help="list at most this many cell changes"
     )
 
+    calc_parser = subparsers.add_parser(
+        "calc",
+        help="compute cells, optionally with changed inputs (what-if); needs the calc extra",
+    )
+    calc_parser.add_argument("path", help="path to an .xlsx/.xlsm/.xlsb/.csv file")
+    calc_parser.add_argument(
+        "targets", nargs="*", help="cells or ranges to compute, e.g. 'Forecast!E4:E7'"
+    )
+    calc_parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="CELL=VALUE",
+        help="change an input before computing, e.g. Assumptions!B4=7%%; repeatable",
+    )
+    calc_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="recompute every formula the targets need, not only those a change reaches",
+    )
+    calc_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="recompute every formula and compare with Excel's saved values (exit 3 on a "
+        "difference)",
+    )
+    calc_parser.add_argument("--json", action="store_true", help="print the result as JSON")
+    calc_parser.add_argument(
+        "--timeout", type=float, default=30.0, help="wall-clock budget in seconds"
+    )
+
     subparsers.add_parser(
         "evaluate",
         help="measure retrieval quality (hit@k, recall@k, MRR); see `excel-rag evaluate --help`",
@@ -206,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
             return _render(args)
         if args.command == "diff":
             return _diff(args)
+        if args.command == "calc":
+            return _calc(args)
         if args.command == "mcp":
             return _mcp(args)
         if args.command == "serve":

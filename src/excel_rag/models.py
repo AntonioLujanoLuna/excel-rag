@@ -77,6 +77,9 @@ class ReferenceKind(StrEnum):
     RANGE = "range"
     TABLE_COLUMN = "table_column"
     NAMED_RANGE = "named_range"
+    #: A spill reference (``B2#``) resolved to the extent its array formula was last *saved* over:
+    #: like a cached value, it is what Excel last computed, not a recomputed extent.
+    SPILL = "spill"
 
 
 class UnresolvedReason(StrEnum):

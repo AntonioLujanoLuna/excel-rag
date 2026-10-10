@@ -130,3 +130,50 @@ def test_a_hostile_array_extent_costs_a_pass_over_the_cells(tmp_path) -> None:
     assert cells["B2"].array_master == "A1"
     assert cells["B2"].cached_value == 5
     assert set(cells) == {"A1", "B2"}
+
+
+class TestSpillReferences:
+    def _entry(self, build, coordinate: str):
+        sheet = load_workbook(build.path("array_formula"), workbook_id="wb", version=1).sheets[0]
+        return next(entry for entry in sheet.formulas if entry.a1_range.a1 == coordinate)
+
+    def test_spill_operator_reads_the_saved_extent(self, build) -> None:
+        entry = self._entry(build, "D2")
+        spill = [ref for ref in entry.references if ref.kind is ReferenceKind.SPILL]
+        assert [(ref.a1_range, ref.target_node_id) for ref in spill] == [
+            ("B2:B4", "wb:v1:range:calc!b2:b4")
+        ]
+        assert spill[0].row_span == {"gte": 2, "lte": 4}
+        assert entry.unresolved_references == ()
+
+    def test_anchorarray_is_the_on_disk_form_of_the_same_thing(self, build) -> None:
+        entry = self._entry(build, "C2")
+        assert [ref.a1_range for ref in entry.references if ref.kind is ReferenceKind.SPILL] == [
+            "B2:B4"
+        ]
+        assert entry.unresolved_references == ()
+
+    def test_a_spill_from_a_cell_with_no_saved_extent_stays_a_gap(self) -> None:
+        from excel_rag.workbook.formulas import FormulaContext, parse_formula
+
+        context = FormulaContext(
+            workbook_id="wb",
+            version=1,
+            sheet_name="Calc",
+            known_sheets=frozenset({"Calc"}),
+            macro_sheets=frozenset(),
+            sheet_max_row={"Calc": 10},
+            tables={},
+            defined_names={},
+        )
+        for formula in ("=SUM(A1#)", "=SUM(_xlfn.ANCHORARRAY(A1))"):
+            parsed = parse_formula(formula, context)
+            assert not any(ref.reference.kind is ReferenceKind.SPILL for ref in parsed.references)
+            assert {gap.reason for gap in parsed.unresolved} == {UnresolvedReason.DYNAMIC_ARRAY}
+
+    def test_a_spill_reader_is_a_dependent_of_every_extent_cell(self, build) -> None:
+        from excel_rag.context import WorkbookSession
+
+        session = WorkbookSession.load(build.path("array_formula"))
+        text = session.dependents("Calc", "B4")
+        assert "C2" in text and "D2" in text

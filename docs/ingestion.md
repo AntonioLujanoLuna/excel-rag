@@ -127,6 +127,12 @@ formula *results*, so the reader keeps them as cached values pointing at their m
 (`array_master`): region detection types them as formula columns, and the rendering marks them `ƒ`
 like any other saved formula value.
 
+A spill reference (`B2#`, which Excel writes to disk as `_xlfn.ANCHORARRAY(B2)`) to an array
+formula's master becomes a `spill` edge over that saved extent. Like a cached value it states what
+Excel last computed, not a recomputation: the extent can differ after the next recalculation, and the
+edge kind says so. It is what makes the formula reading `B2#` a dependent of `B4`. A spill from a
+cell with no saved extent is still a `dynamic_array` gap.
+
 ### Named ranges
 
 A workbook-wide name keys its node on the name (`wb:v1:named_range:growthrate`); a sheet-scoped one on
@@ -152,7 +158,7 @@ cannot be resolved statically becomes an `UnresolvedReference` with the right re
 | `INDIRECT(...)` | `indirect` |
 | `OFFSET(...)` | `volatile_offset` |
 | `[Budget.xlsx]…`, `'…[Book.xlsx]Sheet'!A1`, `[1]…` | `external_link` |
-| `LET`, `LAMBDA`, `@`, spill `#`, dynamic-array functions | `dynamic_array` |
+| `LET`, `LAMBDA`, `@`, dynamic-array functions; a spill `#` (`ANCHORARRAY` on disk) from a cell with no saved array extent | `dynamic_array` |
 | `_xlfn.`/`_xludf.` forms; a range bounded by a function (`A1:INDEX(…)`) | `unsupported_function` |
 | reference to a macro sheet | `macro_sheet` |
 | unknown sheet, table, column or name; a 3-D ref with unknown sheet order | `out_of_range` |

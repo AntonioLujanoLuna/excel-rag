@@ -27,6 +27,18 @@ jobs:
         run: uv run mypy src/excel_rag
       - name: Tests
         run: uv run pytest --cov=excel_rag --cov-report=term
+      - name: Retrieval quality
+        # The hashing embedder and overlap reranker are deterministic stand-ins for the models, so
+        # these floors catch a chunking, fusion or ranking change that loses answers -- one case of
+        # slack below today's figures. Raise them when ranking improves.
+        run: |
+          uv run excel-rag evaluate --embedder hashing --rerank overlap --no-misses \
+            --min lexical:mrr=0.52 --min lexical:hit@10=0.62 \
+            --min hybrid:mrr=0.60 --min hybrid:hit@10=0.68 \
+            --min hybrid+rerank:mrr=0.59 --min hybrid+rerank:hit@10=0.75
+          uv run excel-rag evaluate --mine --embedder hashing --rerank overlap --no-misses \
+            --min hit@3=1.0 --min lexical:mrr=0.62 --min hybrid:mrr=0.79 \
+            --min hybrid+rerank:mrr=0.91
 
   live-elasticsearch:
     # The in-memory double accepts any mapping and refreshes instantly; a real cluster does neither.

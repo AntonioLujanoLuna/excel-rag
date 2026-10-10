@@ -9,6 +9,7 @@ lexical score is a match count), so figures from a live cluster can differ, and 
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,6 +129,66 @@ def evaluate(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Threshold:
+    """A floor on one metric: ``mrr``, ``hit@K`` or ``recall@K``, for one configuration or all."""
+
+    metric: str
+    minimum: float
+    configuration: str | None = None
+
+    @classmethod
+    def parse(cls, text: str) -> Threshold:
+        """``[CONFIGURATION:]METRIC=VALUE``, e.g. ``mrr=0.5`` or ``hybrid:hit@5=0.7``."""
+        target, sep, value = text.partition("=")
+        configuration, colon, metric = target.rpartition(":")
+        metric = metric.strip().lower()
+        if not sep or not re.fullmatch(r"mrr|(?:hit|recall)@\d+", metric):
+            raise ValueError(
+                f"not a threshold (want [CONFIG:]METRIC=VALUE, METRIC mrr, hit@K or "
+                f"recall@K): {text!r}"
+            )
+        try:
+            minimum = float(value)
+        except ValueError as exc:
+            raise ValueError(f"not a number in threshold {text!r}") from exc
+        return cls(metric, minimum, configuration.strip() if colon else None)
+
+    def value(self, metrics: Metrics) -> float:
+        if self.metric == "mrr":
+            return metrics.mrr
+        name, _, k = self.metric.partition("@")
+        table = metrics.hit_at if name == "hit" else metrics.recall_at
+        if int(k) not in table:
+            raise ValueError(f"{self.metric} is not measured; add -k {k}")
+        return table[int(k)]
+
+
+def check_thresholds(report: EvalReport, thresholds: Sequence[Threshold]) -> list[str]:
+    """Each threshold a run falls below, as a sentence; empty when every floor holds.
+
+    A threshold naming a configuration the report has no run for is a failure too: a gate that
+    silently stops applying (the embedder failed to load, so there is no hybrid run) gates nothing.
+    """
+    failures: list[str] = []
+    for threshold in thresholds:
+        runs = [
+            run
+            for run in report.runs
+            if threshold.configuration is None or run.configuration == threshold.configuration
+        ]
+        if not runs:
+            failures.append(f"no {threshold.configuration!r} run to check {threshold.metric} on")
+        for run in runs:
+            measured = threshold.value(run.metrics)
+            if measured < threshold.minimum:
+                failures.append(
+                    f"{run.configuration} {threshold.metric} {measured:.3f} is below "
+                    f"{threshold.minimum:.3f}"
+                )
+    return failures
+
+
 def format_report(report: EvalReport, *, show_misses: bool = True) -> str:
     """A plain-text table, then (optionally) each configuration's cases with no relevant hit."""
     ks = report.k_values
@@ -178,6 +239,8 @@ __all__ = [
     "Configuration",
     "EvalReport",
     "RunResult",
+    "Threshold",
+    "check_thresholds",
     "evaluate",
     "format_report",
     "run_configuration",

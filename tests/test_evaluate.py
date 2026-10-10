@@ -187,3 +187,74 @@ def test_the_in_memory_match_splits_like_the_standard_analyzer() -> None:
     assert _text_matches("Department=Engineering; Employees=42", "engineering?")
     assert _text_matches("Revenue/cost", "cost")
     assert not _text_matches("Engineering", "engineer")
+
+
+class TestMining:
+    def test_labelled_formulas_and_inputs_become_cases(self, tmp_path: Path) -> None:
+        from excel_rag.evaluate import mine_cases
+        from excel_rag.workbook import load_workbook
+
+        model = load_workbook(build_sample_workbook(tmp_path), workbook_id=SAMPLE_WORKBOOK_ID)
+        cases = {case.question: case for case in mine_cases(model)}
+        # A column of identical formulas is one case under its header.
+        assert cases["How is EBITDA calculated?"].expected == (Expected("Forecast", "D4:D7"),)
+        # A formula of its own is named by its row label and its header.
+        assert cases["How is Q1 Revenue calculated?"].expected == (Expected("Forecast", "B4"),)
+        # An input a formula reads is answered by its label and value together.
+        assert cases["What is the Tax rate?"].expected == (Expected("Assumptions", "A5:B5"),)
+        # An input nothing reads is not asked about.
+        assert "What is the EUR/USD exchange rate?" not in cases
+        assert all(case.workbook_id == SAMPLE_WORKBOOK_ID for case in cases.values())
+        assert len({case.id for case in cases.values()}) == len(cases)
+
+    def test_mining_is_deterministic_and_bounded(self, tmp_path: Path) -> None:
+        from excel_rag.evaluate import mine_cases
+        from excel_rag.workbook import load_workbook
+
+        model = load_workbook(build_sample_workbook(tmp_path))
+        assert mine_cases(model) == mine_cases(model)
+        assert len(mine_cases(model, limit=3)) == 3
+
+    def test_mine_and_save_from_the_command_line(self, tmp_path: Path, capsys) -> None:
+        saved = tmp_path / "mined.jsonl"
+        argv = ["--mine", "--embedder", "none", "--rerank", "none", "--save-cases", str(saved)]
+        assert evaluate_main(argv) == 0
+        cases = parse_cases(saved.read_text().splitlines())
+        assert any(case.question == "How is EBITDA calculated?" for case in cases)
+        assert f"lexical        {len(cases)}" in capsys.readouterr().out
+
+    def test_cases_and_mine_are_alternatives(self, tmp_path: Path) -> None:
+        cases = tmp_path / "cases.jsonl"
+        cases.write_text("")
+        assert evaluate_main(["--cases", str(cases), "--mine"]) == 2
+
+
+class TestThresholds:
+    def test_parse(self) -> None:
+        from excel_rag.evaluate import Threshold
+
+        assert Threshold.parse("mrr=0.5") == Threshold("mrr", 0.5)
+        assert Threshold.parse("hybrid+rerank:HIT@5=0.7") == Threshold(
+            "hit@5", 0.7, "hybrid+rerank"
+        )
+        for bad in ("mrr", "ndcg=0.5", "mrr=high", "hit@=1"):
+            with pytest.raises(ValueError):
+                Threshold.parse(bad)
+
+    def test_a_run_below_a_floor_fails_the_command(self, capsys) -> None:
+        argv = ["--embedder", "none", "--rerank", "none", "--no-misses"]
+        assert evaluate_main([*argv, "--min", "mrr=0.0", "--min", "lexical:hit@10=0.1"]) == 0
+        assert evaluate_main([*argv, "--min", "lexical:mrr=1.01"]) == 3
+        assert "lexical mrr" in capsys.readouterr().err
+
+    def test_a_floor_on_a_run_that_did_not_happen_fails(self, capsys) -> None:
+        argv = ["--embedder", "none", "--rerank", "none", "--min", "hybrid:mrr=0.1"]
+        assert evaluate_main(argv) == 3
+        assert "no 'hybrid' run" in capsys.readouterr().err
+
+    def test_a_cut_off_that_was_not_measured_is_an_error(self) -> None:
+        argv = ["--embedder", "none", "--rerank", "none", "-k", "3", "--min", "hit@5=0.1"]
+        assert evaluate_main(argv) == 1
+
+    def test_a_malformed_floor_is_an_error(self) -> None:
+        assert evaluate_main(["--embedder", "none", "--rerank", "none", "--min", "mrr"]) == 1

@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from .retrieval import RetrievalService
 
 #: The suffixes a workbook path may have.
-WORKBOOK_SUFFIXES = (".xlsx", ".xlsm")
+WORKBOOK_SUFFIXES = (".xlsx", ".xlsm", ".xlsb", ".csv")
 #: How many parsed workbooks the server keeps.
 CACHE_SIZE = 8
 #: The most files ``list_workbooks`` names.
@@ -73,7 +73,7 @@ class WorkbookCatalog:
                 continue
             if resolved.is_file():
                 if resolved.suffix.lower() not in WORKBOOK_SUFFIXES:
-                    raise PathRefused(f"{path}: not an .xlsx/.xlsm workbook")
+                    raise PathRefused(f"{path}: not an .xlsx/.xlsm/.xlsb/.csv workbook")
                 return resolved
         if given.is_absolute() and not any(
             given.resolve().is_relative_to(root) for root in self.roots
@@ -149,8 +149,8 @@ def build_server(
 
     @server.tool(annotations=read_only)
     def list_workbooks() -> str:
-        """List the .xlsx/.xlsm workbooks this server may read, as paths to pass to the other
-        tools."""
+        """List the .xlsx/.xlsm/.xlsb/.csv workbooks this server may read, as paths to pass to
+        the other tools."""
         names = catalog.list_workbooks()
         if not names:
             return "No workbooks under " + ", ".join(map(str, catalog.roots)) + "."

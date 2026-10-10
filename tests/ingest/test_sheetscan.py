@@ -15,7 +15,8 @@ from excel_rag.workbook.errors import WorkbookError
 from excel_rag.workbook.reader import read_workbook
 from excel_rag.workbook.sheetscan import scan_sheet
 
-_SKIP = {"corrupt_file", "copy_as", "large_region"}
+# openpyxl reads neither CSV nor .xlsb, so they have no data_only load to compare against.
+_SKIP = {"corrupt_file", "copy_as", "large_region", "csv_file", "xlsb_workbook"}
 _BUILDERS = sorted(
     name
     for name, member in inspect.getmembers(mk, inspect.isfunction)

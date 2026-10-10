@@ -139,6 +139,23 @@ Excel last computed, not a recomputation: the extent can differ after the next r
 edge kind says so. It is what makes the formula reading `B2#` a dependent of `B4`. A spill from a
 cell with no saved extent is still a `dynamic_array` gap.
 
+### CSV and .xlsb
+
+`excel_rag.workbook.formats` reads both into the same raw sheets, so every later stage is unchanged.
+
+- **CSV** (`.csv`, `.tsv`, `.txt`) is one sheet named after the file. The delimiter is sniffed
+  (comma, semicolon, tab, pipe); the encoding is UTF-8 with or without a BOM, falling back to
+  Windows-1252. Numbers and `TRUE`/`FALSE` are typed; in a semicolon-delimited file `1200,5` is the
+  decimal it means there. A number with a leading zero (`007`) is an identifier and stays text, and
+  so does anything that looks like a date or a formula — a CSV has neither, and guessing a date
+  format is how `3/4` becomes the wrong month.
+- **.xlsb** needs the `xlsb` extra (`pyxlsb`) and is read record by record. It gives every cell's
+  value and *which* cells are formulas, but not the formula text, number formats, merges, tables or
+  defined names. A formula cell is kept as a computed cell carrying only its last-saved value — no
+  precedents, never mistaken for an input — and the workbook's warnings say what was not read
+  (dates appear as serial numbers; how many formula cells and defined names were affected). The
+  declared dimension is never used, so a hostile one allocates nothing.
+
 ### Named ranges
 
 A workbook-wide name keys its node on the name (`wb:v1:named_range:growthrate`); a sheet-scoped one on

@@ -30,6 +30,10 @@ dev = [
 mcp = [
     "mcp>=2,<3",
 ]
+# Binary .xlsb workbooks (values, and which cells are formulas; not formula text).
+xlsb = [
+    "pyxlsb>=1.0.10",
+]
 
 [project.scripts]
 excel-rag = "excel_rag.cli:main"

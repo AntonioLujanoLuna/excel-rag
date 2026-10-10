@@ -1,8 +1,8 @@
 # excel-rag
 
-**Structure-aware RAG over Excel workbooks.** An `.xlsx`/`.xlsm` is treated like a codebase:
-worksheets are source files, tables and named ranges are symbols, formulas are the dependency
-graph. Both the semantics and that structure are indexed in Elasticsearch, and one stateless
+**Structure-aware RAG over Excel workbooks.** An `.xlsx`/`.xlsm` (or `.xlsb`, or a CSV) is treated
+like a codebase: worksheets are source files, tables and named ranges are symbols, formulas are the
+dependency graph. Both the semantics and that structure are indexed in Elasticsearch, and one stateless
 endpoint answers a semantic query with **exact coordinates, values and statically resolved
 references**.
 

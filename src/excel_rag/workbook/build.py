@@ -274,6 +274,17 @@ def build_model(
         for sheet in raw.sheets
     }
     sheet_order = tuple(sheet.name for sheet in raw.sheets)
+    spill_extents: dict[tuple[str, str], A1Range] = {}
+    for raw_sheet in raw.sheets:
+        for cell in raw_sheet.cells.values():
+            if cell.array_range is None:
+                continue
+            try:
+                spill_extents[(raw_sheet.name, cell.coordinate)] = A1Range.parse(
+                    raw_sheet.name, cell.array_range
+                )
+            except ValueError:
+                continue
 
     sheets: list[SheetModel] = []
     for sheet in raw.sheets:
@@ -289,6 +300,7 @@ def build_model(
             sheet_order=sheet_order,
             sheet_max_col=sheet_max_col,
             local_names=local_names,
+            spill_extents=spill_extents,
         )
         regions: tuple[Region, ...] = detect_regions(
             sheet, workbook_id=workbook_id, version=version, config=settings

@@ -49,6 +49,11 @@ _EXTERNAL_RE = re.compile(
 #: tokenizer refuses it, so it is recorded as a gap and stripped before tokenising.
 _SPILL_RE = re.compile(r"(?<=[A-Za-z0-9_$)\]])\s*#(?=\s*(?:$|[-+*/^&=<>,;)\s:]))")
 _AT_RE = re.compile(r"(?<![\w.\[])@")
+#: The anchor a spill operator follows: ``B2`` or ``'My Sheet'!$B$2``, at the end of the text.
+_SPILL_ANCHOR_RE = re.compile(
+    r"(?:(?:'(?P<quoted>(?:[^']|'')+)'|(?P<bare>[A-Za-z_][A-Za-z0-9_.]*))!)?"
+    r"\$?(?P<col>[A-Za-z]{1,3})\$?(?P<row>\d{1,7})\s*$"
+)
 _SHEET_REF_RE = re.compile(r"(?:'(?P<quoted>(?:[^']|'')+)'|(?P<bare>[^'!]+))!(?P<ref>.+)")
 _CELL_REF_RE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d{1,7}(?::\$?[A-Za-z]{1,3}\$?\d{1,7})?")
 _COLUMNS_REF_RE = re.compile(r"\$?(?P<start>[A-Za-z]{1,3}):\$?(?P<end>[A-Za-z]{1,3})")
@@ -92,7 +97,6 @@ _DYNAMIC_FUNCTIONS = frozenset(
         "TEXTAFTER",
         "GROUPBY",
         "PIVOTBY",
-        "ANCHORARRAY",
         "SINGLE",
     }
 )
@@ -139,6 +143,9 @@ class FormulaContext:
     #: Sheet-scoped names, keyed by ``(sheet, lowercased name)``. On its own sheet a local name
     #: shadows a workbook-wide one of the same name, as in Excel.
     local_names: Mapping[tuple[str, str], NamedRangeInfo] = field(default_factory=dict)
+    #: The extent each array formula was last saved over, keyed by ``(sheet, master coordinate)``:
+    #: what a spill reference (``B2#``, ``ANCHORARRAY(B2)``) to that master reads.
+    spill_extents: Mapping[tuple[str, str], A1Range] = field(default_factory=dict)
 
     def lookup_name(self, name: str, sheet: str | None = None) -> NamedRangeInfo | None:
         """Resolve ``name`` as a formula on ``sheet`` (default: this formula's sheet) sees it."""
@@ -526,6 +533,34 @@ def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> N
             collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
 
 
+def _resolve_spill(collector: _Collector, anchor: str) -> bool:
+    """An edge over the saved extent of the array formula ``anchor`` names, if there is one.
+
+    ``anchor`` is ``B2`` or ``Sheet!B2``. Returns ``False`` when the anchor is not an array
+    formula's master (or not a cell at all), and the caller keeps the spill as a gap.
+    """
+    context = collector.context
+    match = _SPILL_ANCHOR_RE.fullmatch(anchor.strip())
+    if match is None:
+        return False
+    quoted = match.group("quoted")
+    sheet = quoted.replace("''", "'") if quoted is not None else match.group("bare")
+    sheet = sheet or context.sheet_name
+    coordinate = f"{match.group('col').upper()}{match.group('row')}"
+    extent = context.spill_extents.get((sheet, coordinate))
+    if extent is None:
+        return False
+    collector.edge(
+        range_node_id(context.workbook_id, context.version, sheet, extent.a1),
+        sheet,
+        extent.a1,
+        ReferenceKind.SPILL,
+        True,
+        (extent.min_row, extent.max_row, extent.min_col, extent.max_col),
+    )
+    return True
+
+
 def _resolve_three_d(collector: _Collector, text: str, sheet_part: str, ref: str) -> None:
     """``Jan:Mar!B2`` reads ``B2`` on every sheet from ``Jan`` to ``Mar``, in workbook order."""
     context = collector.context
@@ -565,11 +600,16 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
             "implicit-intersection '@' operator is not statically resolvable",
         )
     spills = [match.span() for match in _SPILL_RE.finditer(outside_strings)]
-    if spills:
+    unresolved_spill = False
+    for start, _end in spills:
+        anchor = _SPILL_ANCHOR_RE.search(outside_strings[:start])
+        if anchor is None or not _resolve_spill(collector, text[anchor.start() : start]):
+            unresolved_spill = True
+    if unresolved_spill:
         collector.gap(
             "#",
             UnresolvedReason.DYNAMIC_ARRAY,
-            "spill-range '#' reference is not statically resolvable",
+            "spill-range '#' reference to a cell with no saved array extent",
         )
 
     try:
@@ -586,7 +626,7 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
         and token.value[:-1].strip().upper().rsplit(".", 1)[-1] in _BINDING_FUNCTIONS
         for token in tokens
     )
-    for token in tokens:
+    for index, token in enumerate(tokens):
         if token.type == Token.FUNC and token.subtype == Token.OPEN:
             name = token.value[:-1].strip()
             if ":" in name:
@@ -597,6 +637,24 @@ def parse_formula(formula: str, context: FormulaContext) -> ParsedFormula:
                     UnresolvedReason.UNSUPPORTED_FUNCTION,
                     "a range bounded by a function result is not statically resolvable",
                 )
+            if name.upper().rsplit(".", 1)[-1] == "ANCHORARRAY":
+                # How Excel stores `B2#` on disk: `_xlfn.ANCHORARRAY(B2)`.
+                argument = tokens[index + 1] if index + 1 < len(tokens) else None
+                closing = tokens[index + 2] if index + 2 < len(tokens) else None
+                if (
+                    argument is None
+                    or closing is None
+                    or argument.type != Token.OPERAND
+                    or closing.type != Token.FUNC
+                    or closing.subtype != Token.CLOSE
+                    or not _resolve_spill(collector, argument.value)
+                ):
+                    collector.gap(
+                        f"{name}(...)",
+                        UnresolvedReason.DYNAMIC_ARRAY,
+                        "spill reference to a cell with no saved array extent",
+                    )
+                continue
             collector.unresolved.extend(_function_gaps(name))
         elif token.type == Token.OPERAND and token.subtype == Token.RANGE:
             _resolve_operand(collector, token.value, binds_names=binds_names)

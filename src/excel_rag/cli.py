@@ -94,6 +94,19 @@ def _render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diff(args: argparse.Namespace) -> int:
+    from .workbook.diff import diff_files, format_diff
+
+    diff = diff_files(args.before, args.after, max_changes=args.max_changes)
+    if args.json:
+        payload = asdict(diff)
+        payload["total"] = diff.total
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    else:
+        print(format_diff(diff))
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -130,6 +143,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="tell the model omitted ranges can be read with the workbook tools",
     )
 
+    diff_parser = subparsers.add_parser(
+        "diff", help="what changed between two versions of a workbook (cells, formulas, impact)"
+    )
+    diff_parser.add_argument("before", help="the earlier .xlsx/.xlsm")
+    diff_parser.add_argument("after", help="the later .xlsx/.xlsm")
+    diff_parser.add_argument("--json", action="store_true", help="print the diff as JSON")
+    diff_parser.add_argument(
+        "--max-changes", type=int, default=500, help="list at most this many cell changes"
+    )
+
     subparsers.add_parser(
         "evaluate",
         help="measure retrieval quality (hit@k, recall@k, MRR); see `excel-rag evaluate --help`",
@@ -157,6 +180,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "render":
             return _render(args)
+        if args.command == "diff":
+            return _diff(args)
         if args.command == "serve":
             return _serve(args)
     except IngestError as error:

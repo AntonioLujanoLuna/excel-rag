@@ -83,13 +83,24 @@ The definitions are plain dicts in the Messages API shape with `strict: true` an
 required. A bad call (unknown sheet, malformed range, extra argument) is returned as a
 `tool_result` with `is_error: true` and a message the model can correct from, never an exception.
 
+## Comparing two versions
+
+`excel_rag.workbook.diff` (`excel-rag diff before.xlsx after.xlsx`, `--json` for the structure)
+compares two files with the same reader: sheets added and removed, and every cell that changed,
+classified as an input `value`, a `formula`, a `result` (same formula, different saved value — an
+upstream input moved), a `kind` change (value ↔ formula), or `added`/`removed`. A changed formula
+lists what it now reads and no longer reads; a changed input lists the formulas in the new version
+that read it, so "the growth rate moved, and these cells depend on it" is one answer. Nothing is
+recalculated. Named ranges whose target moved are listed too. The listing is capped
+(`--max-changes`, 500), the per-sheet counts never are. Sheets are matched by name, so a renamed
+sheet reads as removed plus added.
+
 ## Limits
 
-- **Reading is the slow part.** openpyxl parses every cell's XML in pure Python, and the reader
-  loads the workbook twice (formula text, then saved values). On a CPU sandbox a 50,000 × 10 sheet
-  with two formula columns took ~20 s to read and ~3 s to model; rendering it took ~2 s and every
-  tool call well under a second. A single pass reading each cell's `<f>` and `<v>` together would
-  roughly halve the read.
+- **Reading is the slow part.** openpyxl parses every cell's XML in pure Python. The saved values
+  of formula cells now come from one streaming pass over the sheet XML instead of a second openpyxl
+  load, which took a 50,000-row sheet with a formula column from 9.9 s to 5.7 s; rendering and
+  every tool call stay well under that.
 - **Region detection is heuristic.** A cell no detected region covers is still listed (“Other
   cells”), so nothing disappears, but an unusual layout may be split differently than a person
   would.

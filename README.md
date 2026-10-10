@@ -107,7 +107,8 @@ column letters, regions with headers, units and notes, formulas with Excel's sav
 they read, every omission marked — and gives the model four tools (`read_range`, `find`,
 `precedents`, `dependents`) for what the budget left out. Same reader, same guarantees, no
 Elasticsearch. See [docs/context.md](docs/context.md), `excel-rag render`, and
-`examples/ask_workbook.py`.
+`examples/ask_workbook.py`. `excel-rag diff before.xlsx after.xlsx` says what changed between two
+versions — inputs, formulas, saved results — and which formulas read each changed input.
 
 ## Invariants
 

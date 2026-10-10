@@ -55,7 +55,7 @@ def inspect_workbook(path: str | Path) -> dict[str, Any]:
         "workbook_id": ingested.model.workbook_id,
         "sheets": sheets,
         "regions": regions,
-        "named_ranges": [name.name for name in ingested.model.named_ranges],
+        "named_ranges": [name.label for name in ingested.model.named_ranges],
         "macro_sheets": list(ingested.model.macro_sheet_names),
         "has_vba": ingested.model.has_vba,
         "documents": {

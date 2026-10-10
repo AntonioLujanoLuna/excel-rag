@@ -110,11 +110,12 @@ class TableInfo:
 
 @dataclass(frozen=True, slots=True)
 class NamedRangeInfo:
-    """A defined name resolved to its target, or ``None`` when it cannot be statically resolved."""
+    """A defined name resolved to its target. ``scope_sheet`` is set for a sheet-scoped name."""
 
     name: str
     sheet_name: str
     a1_range: A1Range
+    scope_sheet: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,12 +129,22 @@ class FormulaContext:
     macro_sheets: frozenset[str]
     sheet_max_row: Mapping[str, int]
     tables: Mapping[str, TableInfo]
+    #: Workbook-wide names, keyed by lowercased name.
     defined_names: Mapping[str, NamedRangeInfo]
     #: Workbook sheet order, which a 3-D reference (``Jan:Mar!B2``) spans. Empty means unknown, and
     #: a 3-D reference is then a gap rather than a guess.
     sheet_order: tuple[str, ...] = ()
     #: Used width per sheet, the extent a whole-row reference (``2:2``) is clipped to.
     sheet_max_col: Mapping[str, int] = field(default_factory=dict)
+    #: Sheet-scoped names, keyed by ``(sheet, lowercased name)``. On its own sheet a local name
+    #: shadows a workbook-wide one of the same name, as in Excel.
+    local_names: Mapping[tuple[str, str], NamedRangeInfo] = field(default_factory=dict)
+
+    def lookup_name(self, name: str, sheet: str | None = None) -> NamedRangeInfo | None:
+        """Resolve ``name`` as a formula on ``sheet`` (default: this formula's sheet) sees it."""
+        key = name.lower()
+        local = self.local_names.get((sheet or self.sheet_name, key))
+        return local if local is not None else self.defined_names.get(key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,6 +195,15 @@ def _function_gaps(raw_name: str) -> list[UnresolvedReference]:
                 "OFFSET(...)",
                 UnresolvedReason.VOLATILE_OFFSET,
                 "OFFSET is volatile; its target is not statically resolvable",
+            )
+        ]
+    if base == "TABLE":
+        return [
+            _gap(
+                "TABLE(...)",
+                UnresolvedReason.UNSUPPORTED_FUNCTION,
+                "what-if data table: Excel recomputes the table's formula with each input "
+                "substituted; only the input cells are edges",
             )
         ]
     if base in _DYNAMIC_FUNCTIONS:
@@ -408,12 +428,21 @@ def _resolve_on_sheet(collector: _Collector, text: str, sheet: str, ref: str) ->
     return False
 
 
-def _resolve_name(collector: _Collector, text: str, name: str, *, binds_names: bool) -> None:
+def _resolve_name(
+    collector: _Collector,
+    text: str,
+    name: str,
+    *,
+    binds_names: bool,
+    sheet: str | None = None,
+) -> None:
     context = collector.context
-    defined = context.defined_names.get(name.lower())
+    defined = context.lookup_name(name, sheet)
     if defined is not None:
         collector.edge(
-            named_range_node_id(context.workbook_id, context.version, defined.name),
+            named_range_node_id(
+                context.workbook_id, context.version, defined.name, defined.scope_sheet
+            ),
             defined.sheet_name,
             defined.a1_range.a1,
             ReferenceKind.NAMED_RANGE,
@@ -492,7 +521,7 @@ def _resolve_operand(collector: _Collector, raw: str, *, binds_names: bool) -> N
     if not _resolve_on_sheet(collector, text, sheet_part, ref):
         if _NAME_RE.fullmatch(ref):
             # A sheet-scoped defined name: `Inputs!Rate`.
-            _resolve_name(collector, text, ref, binds_names=binds_names)
+            _resolve_name(collector, text, ref, binds_names=binds_names, sheet=sheet_part)
         else:
             collector.gap(text, UnresolvedReason.MALFORMED, "unrecognised reference form")
 
@@ -594,18 +623,15 @@ def _blank_out(text: str, spans: list[tuple[int, int]]) -> str:
 def resolve_named_range(
     raw_name: str,
     attr_text: str | None,
-    local_sheet_id: int | None,
+    scope_sheet: str | None,
     *,
     workbook_id: str,
     version: int,
     known_sheets: frozenset[str],
-    sheet_by_index: Mapping[int, str],
 ) -> NamedRange:
     """Resolve one defined name into a :class:`NamedRange`, or a kept gap if not a rectangle."""
-    node = named_range_node_id(workbook_id, version, raw_name)
-    scope = "workbook"
-    if local_sheet_id is not None:
-        scope = sheet_by_index.get(local_sheet_id, "workbook")
+    node = named_range_node_id(workbook_id, version, raw_name, scope_sheet)
+    scope = scope_sheet
     if not attr_text:
         return NamedRange(raw_name, scope, None, None, node, False, None, "empty definition")
     candidate = attr_text.strip()

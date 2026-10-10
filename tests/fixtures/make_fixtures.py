@@ -269,3 +269,85 @@ def copy_as(source: Path, directory: Path, name: str) -> Path:
     target = directory / name
     shutil.copyfile(source, target)
     return target
+
+
+def sheet_scoped_names(directory: Path) -> Path:
+    """The same local name on two sheets, a local name shadowing a global one, and a global."""
+    wb = openpyxl.Workbook()
+    jan = wb.active
+    jan.title = "Jan"
+    feb = wb.create_sheet("Feb")
+    summary = wb.create_sheet("Summary")
+    for ws, rate, tax in ((jan, 0.1, 0.2), (feb, 0.3, 0.4)):
+        ws["A1"], ws["C1"], ws["C2"] = "Rate", rate, tax
+        ws.defined_names["Rate"] = DefinedName("Rate", attr_text=f"{ws.title}!$C$1")
+    wb.defined_names["Tax"] = DefinedName("Tax", attr_text="Jan!$C$2")
+    feb.defined_names["Tax"] = DefinedName("Tax", attr_text="Feb!$C$2")
+    jan["B1"] = "=Rate*2"
+    feb["B1"] = "=Tax"
+    summary["A1"] = "Total"
+    summary["B1"] = "=Jan!Rate+Feb!Rate+Tax"
+    path = directory / "sheet_scoped_names.xlsx"
+    wb.save(path)
+    return path
+
+
+def _excel_saved_values(values: dict[str, str]) -> object:
+    """A sheet-XML editor that fills ``<v/>`` of the given cells and adds bare-value cells, the way
+    Excel saves an array formula's master and the rest of its extent."""
+
+    def edit(data: bytes) -> bytes:
+        text = data.decode()
+        for coordinate, value in values.items():
+            master = re.search(rf'(<c r="{coordinate}"[^>]*>.*?)<v\s*/>(</c>)', text, re.DOTALL)
+            if master is not None:
+                text = text[: master.start()] + (
+                    f"{master.group(1)}<v>{value}</v>{master.group(2)}" + text[master.end() :]
+                )
+                continue
+            row = re.match(r"[A-Z]+(\d+)", coordinate)
+            assert row is not None
+            text = re.sub(
+                rf'(<row r="{row.group(1)}"[^>]*>.*?)(</row>)',
+                lambda found, c=coordinate, v=value: (
+                    f'{found.group(1)}<c r="{c}"><v>{v}</v></c>' + found.group(2)
+                ),
+                text,
+                count=1,
+                flags=re.DOTALL,
+            )
+        return text.encode()
+
+    return edit
+
+
+def array_formula(directory: Path) -> Path:
+    """An array formula over B2:B4 and a what-if data table, as Excel saves them: the master's
+    formula and value, and the rest of each extent as bare values."""
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Calc"
+    ws["A1"], ws["B1"], ws["C1"], ws["E1"] = "Qty", "Double", "Total", "Scenario"
+    for row, qty in ((2, 1), (3, 2), (4, 3)):
+        ws[f"A{row}"] = qty
+    ws["B2"] = ArrayFormula("B2:B4", "=A2:A4*2")
+    ws["C2"] = "=SUM(_xlfn.ANCHORARRAY(B2))"
+    ws["D2"] = "=SUM(B2#)"
+    ws["E2"] = "placeholder"
+    base = directory / "array_formula_base.xlsx"
+    wb.save(base)
+
+    fill = _excel_saved_values({"B2": "2", "B3": "4", "B4": "6", "C2": "12", "D2": "12", "E3": "9"})
+
+    def edit(data: bytes) -> bytes:
+        data = data.replace(
+            b'<c r="E2" t="inlineStr"><is><t>placeholder</t></is></c>',
+            b'<c r="E2"><f t="dataTable" ref="E2:E3" dt2D="0" dtr="0" r1="A2"/><v>7</v></c>',
+        )
+        return fill(data)  # type: ignore[operator, no-any-return]
+
+    return _rewrite_zip(
+        base, directory / "array_formula.xlsx", edits={"xl/worksheets/sheet1.xml": edit}
+    )

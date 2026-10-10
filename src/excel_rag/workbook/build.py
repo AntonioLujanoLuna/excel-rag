@@ -147,20 +147,18 @@ def _build_tables(raw: RawWorkbook) -> dict[str, TableInfo]:
 
 def _build_named_ranges(raw: RawWorkbook, workbook_id: str, version: int) -> tuple[NamedRange, ...]:
     known = frozenset(sheet.name for sheet in raw.sheets if not sheet.is_macro_sheet)
-    sheet_by_index = {index: sheet.name for index, sheet in enumerate(raw.sheets)}
     names = [
         resolve_named_range(
             defined.name,
             defined.attr_text,
-            defined.local_sheet_id,
+            defined.scope_sheet,
             workbook_id=workbook_id,
             version=version,
             known_sheets=known,
-            sheet_by_index=sheet_by_index,
         )
         for defined in raw.defined_names
     ]
-    names.sort(key=lambda name: name.name.lower())
+    names.sort(key=lambda name: (name.name.lower(), name.scope_sheet or ""))
     return tuple(names)
 
 
@@ -171,7 +169,11 @@ def _build_formulas(
     formula_cells = [cell for cell in sheet.cells.values() if cell.formula is not None]
     groups: dict[str, list[CellValue]] = {}
     for cell in formula_cells:
-        groups.setdefault(normalize_formula(cell.formula or ""), []).append(cell)
+        key = normalize_formula(cell.formula or "")
+        if cell.array_range is not None:
+            # An array formula owns its extent; it is never folded into a cluster of look-alikes.
+            key = f"{key}\x00array\x00{cell.coordinate}"
+        groups.setdefault(key, []).append(cell)
     entries: list[FormulaEntry] = []
     for pattern in sorted(groups):
         cells = sorted(groups[pattern], key=lambda cell: (cell.row, cell.column))
@@ -192,6 +194,7 @@ def _build_formulas(
                     unresolved_references=parsed.unresolved,
                     member_coordinates=(cell.coordinate,),
                     is_cluster=False,
+                    array_range=cell.array_range,
                 )
             )
             continue
@@ -240,12 +243,26 @@ def build_model(
     macro_sheets = frozenset(raw.macro_sheet_names)
     tables = _build_tables(raw)
     named_ranges = _build_named_ranges(raw, workbook_id, version)
-    defined_names = {
-        name.name.lower(): NamedRangeInfo(
-            name.name, name.sheet_name, A1Range.parse(name.sheet_name, name.a1)
+    resolved_names = [
+        (
+            name,
+            NamedRangeInfo(
+                name.name,
+                name.sheet_name,
+                A1Range.parse(name.sheet_name, name.a1),
+                name.scope_sheet,
+            ),
         )
         for name in named_ranges
         if name.resolved and name.sheet_name and name.a1
+    ]
+    defined_names = {
+        name.name.lower(): info for name, info in resolved_names if name.scope_sheet is None
+    }
+    local_names = {
+        (name.scope_sheet, name.name.lower()): info
+        for name, info in resolved_names
+        if name.scope_sheet is not None
     }
     sheet_max_row = {
         sheet.name: (max((cell.row for cell in sheet.cells.values()), default=1))
@@ -271,6 +288,7 @@ def build_model(
             defined_names=defined_names,
             sheet_order=sheet_order,
             sheet_max_col=sheet_max_col,
+            local_names=local_names,
         )
         regions: tuple[Region, ...] = detect_regions(
             sheet, workbook_id=workbook_id, version=version, config=settings

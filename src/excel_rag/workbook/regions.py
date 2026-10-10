@@ -141,7 +141,7 @@ class RegionConfig:
 
 
 def _present(cells: list[CellValue]) -> list[CellValue]:
-    return [cell for cell in cells if cell.value is not None or cell.formula is not None]
+    return [cell for cell in cells if cell.value is not None or cell.computed]
 
 
 def _bands(present: set[int], low: int, high: int) -> list[tuple[int, int]]:
@@ -225,7 +225,7 @@ def _infer_type(cells: list[CellValue]) -> str:
         return "empty"
     kinds: set[str] = set()
     for cell in present:
-        if cell.formula is not None:
+        if cell.computed:
             kinds.add("formula")
         elif cell.is_date:
             kinds.add("date")
@@ -257,7 +257,7 @@ def _infer_type(cells: list[CellValue]) -> str:
 
 
 def _cell_display(cell: CellValue) -> str:
-    if cell.formula is not None:
+    if cell.computed:
         return format_value(cell.cached_value)
     return format_value(cell.value)
 
@@ -327,9 +327,7 @@ def _build_columns(
         )
         name = " / ".join(header_texts) if header_texts else f"Column {column_letter(index)}"
         letter = column_letter(index)
-        present_rows = [
-            cell.row for cell in data_cells if cell.value is not None or cell.formula is not None
-        ]
+        present_rows = [cell.row for cell in data_cells if cell.value is not None or cell.computed]
         a1 = _column_range(
             sheet_name, index, present_rows, header_rows[0] if header_rows else col_band[0]
         )

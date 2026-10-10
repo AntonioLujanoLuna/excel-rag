@@ -8,6 +8,10 @@ Three rules govern this module:
 * Macros are never loaded (``keep_vba=False``) and never executed -- openpyxl does not run VBA, and
   a workbook carrying a ``vbaProject.bin`` or a macro sheet is only *noticed*, so a formula pointing
   at a macro sheet resolves to an explicit ``macro_sheet`` gap rather than a fabricated edge.
+* An array formula (a legacy CSE formula, or a dynamic-array formula Excel 365 saved) is read as
+  its text, and the other cells of its saved extent are *computed* cells: their value is the one
+  Excel last saved, labelled as cached and pointing at the formula that produced it -- never
+  mistaken for input data.
 * A declared dimension is not trusted. openpyxl already ignores ``<dimension ref="A1:XFD1048576">``,
   so nothing is allocated for it; we read the string from the package only to *report* that a
   hostile dimension was declared and ignored.
@@ -19,13 +23,18 @@ import hashlib
 import io
 import re
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
 import openpyxl  # type: ignore[import-untyped]
+from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.utils.exceptions import InvalidFileException  # type: ignore[import-untyped]
+from openpyxl.worksheet.formula import (  # type: ignore[import-untyped]
+    ArrayFormula,
+    DataTableFormula,
+)
 
 from .canonical import CellValue
 from .errors import WorkbookError
@@ -56,11 +65,12 @@ class RawTable:
 
 @dataclass(frozen=True, slots=True)
 class RawDefinedName:
-    """A defined name as read. ``local_sheet_id`` is the sheet scope, ``None`` for workbook-wide."""
+    """A defined name as read. ``scope_sheet`` is the sheet it is local to, ``None`` for
+    workbook-wide."""
 
     name: str
     attr_text: str | None
-    local_sheet_id: int | None
+    scope_sheet: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +149,78 @@ def merged_top_left(ref: str) -> str:
     """``"A1:B1"`` -> ``"A1"``: the only cell of a merged range that carries a value."""
     start = ref.split(":", 1)[0]
     return start.replace("$", "").upper()
+
+
+def _formula_text(value: Any) -> tuple[str, str | None]:
+    """A formula cell's text, and the extent an array formula covers (``None`` for a plain one).
+
+    openpyxl gives an array formula as an :class:`ArrayFormula` and a what-if data table as a
+    :class:`DataTableFormula`, not as a string; ``str()`` of either is an object repr.
+    """
+    if isinstance(value, ArrayFormula):
+        text = value.text or ""
+        ref = str(value.ref) if value.ref else None
+        return (text if text.startswith("=") else f"={text}"), ref
+    if isinstance(value, DataTableFormula):
+        # Excel shows a data table as {=TABLE(row_input, column_input)}; the inputs are cells.
+        first = value.r1 or ""
+        second = value.r2 or ""
+        if value.dt2D:
+            arguments = f"{first},{second}"
+        elif value.dtr:
+            arguments = f"{first},"
+        else:
+            arguments = f",{first}"
+        return f"=TABLE({arguments})", str(value.ref) if value.ref else None
+    return str(value), None
+
+
+def _extent_bounds(ref: str) -> tuple[int, int, int, int] | None:
+    """``B2:B40`` -> ``(min_row, max_row, min_col, max_col)``, or ``None`` if unparseable."""
+    match = _DIMENSION.fullmatch(ref.strip())
+    if match is None:
+        return None
+    start_col, start_row, end_col, end_row = match.groups()
+    min_col, min_row = column_index(start_col), int(start_row)
+    max_col = column_index(end_col) if end_col else min_col
+    max_row = int(end_row) if end_row else min_row
+    if max_row < min_row or max_col < min_col:
+        return None
+    return min_row, max_row, min_col, max_col
+
+
+def _mark_array_extents(cells: dict[str, CellValue], extents: dict[str, str]) -> None:
+    """Turn the bare values inside each array formula's extent into cached formula results.
+
+    Excel writes an extent cell as a bare ``<v>``, which openpyxl reads as a constant. The work per
+    extent is bounded by the cells that exist, not by the declared extent, so a hostile
+    ``ref="A1:XFD1048576"`` costs one pass over the populated cells.
+    """
+    for master, ref in extents.items():
+        bounds = _extent_bounds(ref)
+        if bounds is None:
+            continue
+        min_row, max_row, min_col, max_col = bounds
+        area = (max_row - min_row + 1) * (max_col - min_col + 1)
+        if area <= len(cells):
+            candidates = [
+                f"{get_column_letter(col)}{row}"
+                for row in range(min_row, max_row + 1)
+                for col in range(min_col, max_col + 1)
+            ]
+        else:
+            candidates = [
+                coordinate
+                for coordinate, cell in cells.items()
+                if min_row <= cell.row <= max_row and min_col <= cell.column <= max_col
+            ]
+        for coordinate in candidates:
+            cell = cells.get(coordinate)
+            if cell is None or coordinate == master or cell.computed:
+                continue
+            cells[coordinate] = replace(
+                cell, value=None, cached_value=cell.value, array_master=master
+            )
 
 
 def _read_package(data: bytes) -> _PackageFacts:
@@ -276,12 +358,19 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
             cached_wb[name] if cached_wb is not None and name in cached_wb.sheetnames else None
         )
         cells: dict[str, CellValue] = {}
+        #: Each array formula's master coordinate -> the extent its result was saved over.
+        array_extents: dict[str, str] = {}
         for row in ws.iter_rows():
             for cell in row:
                 if cell.value is None:
                     continue
                 data_type = cell.data_type or "n"
-                formula = str(cell.value) if data_type == "f" else None
+                formula: str | None = None
+                extent: str | None = None
+                if data_type == "f":
+                    formula, extent = _formula_text(cell.value)
+                    if extent is not None:
+                        array_extents[cell.coordinate] = extent
                 cached_value: Any = None
                 if formula is not None and cached_ws is not None:
                     cached_value = cached_ws[cell.coordinate].value
@@ -300,7 +389,9 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                     is_percentage="%" in number_format,
                     is_currency=bool(_CURRENCY.search(number_format)),
                     merged_range=master_ranges.get(cell.coordinate),
+                    array_range=extent,
                 )
+        _mark_array_extents(cells, array_extents)
         tables: list[RawTable] = []
         for table_name in list(ws.tables):
             table = ws.tables[table_name]
@@ -331,17 +422,23 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
             )
         )
 
-    defined_names = tuple(
-        RawDefinedName(name=name, attr_text=dn.attr_text, local_sheet_id=dn.localSheetId)
+    defined_names: list[RawDefinedName] = [
+        RawDefinedName(name=name, attr_text=dn.attr_text)
         for name, dn in formula_wb.defined_names.items()
-    )
+    ]
+    # openpyxl >= 3.1 keeps a sheet-scoped name on its worksheet, not in ``wb.defined_names``.
+    for ws in formula_wb.worksheets:
+        defined_names.extend(
+            RawDefinedName(name=name, attr_text=dn.attr_text, scope_sheet=ws.title)
+            for name, dn in ws.defined_names.items()
+        )
 
     return RawWorkbook(
         path=location,
         source_file=label,
         source_sha256=digest,
         sheets=tuple(sheets),
-        defined_names=defined_names,
+        defined_names=tuple(defined_names),
         macro_sheet_names=tuple(sorted(macro_names)),
         has_vba=facts.has_vba,
         warnings=tuple(

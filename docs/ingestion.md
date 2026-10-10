@@ -112,6 +112,29 @@ becomes one `RANGE` node covering the group, one `FORMULA_SUMMARY` chunk, and on
 relative precedent — so a 200-row `=A2*2` column is a single edge to `A2:A201`, matching the
 "`SUM(Actuals!D2:D500)` is one edge" rule.
 
+### Array formulas and data tables
+
+openpyxl hands an array formula (a legacy CSE formula, or a dynamic-array formula Excel 365 saved) to
+the reader as an `ArrayFormula` object and a what-if data table as a `DataTableFormula`, not as text.
+The reader takes the formula text from the former and writes the latter as Excel shows it,
+`=TABLE(row_input, column_input)`, whose input cells become edges and which carries an
+`unsupported_function` gap: Excel recomputes the table by substituting each input, which no static
+edge can say. An array formula is never folded into a cluster, and its formula node records the
+extent its result last covered (`array_range`).
+
+Excel saves the rest of that extent as bare values, which openpyxl reads as constants. They are
+formula *results*, so the reader keeps them as cached values pointing at their master cell
+(`array_master`): region detection types them as formula columns, and the rendering marks them `ƒ`
+like any other saved formula value.
+
+### Named ranges
+
+A workbook-wide name keys its node on the name (`wb:v1:named_range:growthrate`); a sheet-scoped one on
+`Sheet!Name` (`wb:v1:named_range:jan!rate`), so the same local name on twelve monthly sheets is twelve
+nodes. openpyxl 3.1 keeps sheet-scoped names on the worksheet rather than the workbook; the reader
+reads both. A bare name in a formula resolves to its own sheet's local name first and to the
+workbook-wide one otherwise, as Excel does; `Feb!Rate` resolves on `Feb`.
+
 ## Formula reference extraction
 
 Pure text analysis, never evaluation. Formulas are tokenised with openpyxl's

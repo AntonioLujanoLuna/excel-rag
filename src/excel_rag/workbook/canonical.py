@@ -12,6 +12,7 @@ structure documents agree on one scheme.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -74,8 +75,13 @@ def table_column_node_id(
     return node_id(workbook_id, version, "column", f"{sheet}!{table}!{column}")
 
 
-def named_range_node_id(workbook_id: str, version: int, name: str) -> str:
-    return node_id(workbook_id, version, "named_range", name)
+def named_range_node_id(
+    workbook_id: str, version: int, name: str, scope_sheet: str | None = None
+) -> str:
+    """A workbook-wide name keys on its name; a sheet-scoped one on ``Sheet!Name``, so the same
+    local name on two sheets (``Rate`` on every monthly sheet) is two nodes."""
+    key = name if scope_sheet is None else f"{scope_sheet}!{name}"
+    return node_id(workbook_id, version, "named_range", key)
 
 
 def chunk_id(workbook_id: str, version: int, key: str) -> str:
@@ -132,6 +138,16 @@ class CellValue:
     is_percentage: bool = False
     is_currency: bool = False
     merged_range: str | None = None
+    #: For a cell inside an array formula's saved extent (not its master): the master coordinate.
+    #: Its ``cached_value`` is the formula's last-saved result there; ``value`` stays ``None``.
+    array_master: str | None = None
+    #: For an array formula's master cell: the extent its result covers (``B2:B40``).
+    array_range: str | None = None
+
+    @property
+    def computed(self) -> bool:
+        """Whether the cell's content is a formula result rather than input data."""
+        return self.formula is not None or self.array_master is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,16 +198,33 @@ class Region:
 
 @dataclass(frozen=True, slots=True)
 class NamedRange:
-    """A defined name and where it points, if that can be resolved statically."""
+    """A defined name and where it points, if that can be resolved statically.
+
+    ``scope_sheet`` is the sheet a sheet-scoped name is local to, ``None`` for a workbook-wide one.
+    """
 
     name: str
-    scope: str
+    scope_sheet: str | None
     sheet_name: str | None
     a1: str | None
     node_id: str
     resolved: bool
     target_node_id: str | None
     detail: str | None = None
+
+    @property
+    def scope(self) -> str:
+        """``workbook`` or the name of the sheet it is local to."""
+        return "workbook" if self.scope_sheet is None else self.scope_sheet
+
+    @property
+    def label(self) -> str:
+        """How a formula on another sheet would write it: ``Rate`` or ``Jan!Rate``."""
+        if self.scope_sheet is None:
+            return self.name
+        sheet = self.scope_sheet
+        quoted = sheet if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", sheet) else f"'{sheet}'"
+        return f"{quoted}!{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +245,8 @@ class FormulaEntry:
     unresolved_references: tuple[UnresolvedReference, ...]
     member_coordinates: tuple[str, ...]
     is_cluster: bool
+    #: An array formula's saved extent (``B2:B40``), the cells its result last spilled into.
+    array_range: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

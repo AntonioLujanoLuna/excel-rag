@@ -14,8 +14,9 @@ describe the work this request cost.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
-from ..embedding import Embedder
+from ..embedding import Embedder, chunk_text
 from ..models import (
     Hit,
     NodePayload,
@@ -23,6 +24,7 @@ from ..models import (
     SearchResponse,
     SourceRef,
 )
+from ..rerank import Reranker
 from ..settings import Settings
 from .expansion import ExpansionResult, expand
 from .fusion import RankedCandidate, fuse, matched_fields
@@ -40,11 +42,16 @@ class RetrievalService:
     """The retrieval workflow, independent of HTTP."""
 
     def __init__(
-        self, repository: Repository, settings: Settings, embedder: Embedder | None = None
+        self,
+        repository: Repository,
+        settings: Settings,
+        embedder: Embedder | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self._repository = repository
         self._settings = settings
         self._embedder = embedder
+        self._reranker = reranker
 
     def search(
         self,
@@ -90,7 +97,8 @@ class RetrievalService:
             if query_vector is not None and query_embedding_model is not None
             else None
         )
-        top = fuse(lexical, vector)[: request.top_k]
+        fused = fuse(lexical, vector)
+        top = self._rerank(request, fused)[: request.top_k]
 
         expansion = ExpansionResult()
         if request.include_structure:
@@ -115,6 +123,29 @@ class RetrievalService:
             took_ms=took_ms,
             es_requests=self._repository.es_requests() - calls_before,
         )
+
+    def _rerank(
+        self, request: SearchRequest, fused: list[RankedCandidate]
+    ) -> list[RankedCandidate]:
+        """Rescore the head of the fused list with the reranker, if one is configured.
+
+        The window is at least ``top_k``, so reranking reorders what fusion would have returned
+        and adds to it from just below; it never drops a hit to make room.
+        """
+        if self._reranker is None or not request.query.strip() or not fused:
+            return fused
+        window = max(request.top_k, self._settings.rerank.window)
+        head, tail = fused[:window], fused[window:]
+        scores = self._reranker.score(
+            request.query,
+            [chunk_text(item.candidate.chunk.title, item.candidate.chunk.content) for item in head],
+        )
+        rescored = [
+            replace(item, score=score, score_kind="rerank")
+            for item, score in zip(head, scores, strict=True)
+        ]
+        rescored.sort(key=lambda item: (-item.score, item.candidate.chunk.id))
+        return rescored + tail
 
     def _expand(
         self, request: SearchRequest, scope: Scope, top: list[RankedCandidate]

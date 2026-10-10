@@ -27,6 +27,7 @@ from .api.schemas import error_body
 from .embedding import build_embedder
 from .es import ElasticsearchLike
 from .fake_es import in_memory_client
+from .rerank import build_reranker
 from .retrieval import TooManyWorkbooks, UnknownWorkbook
 from .settings import Settings
 
@@ -61,6 +62,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     #: One embedder per app: the model loads once (on the first query, or at startup through the
     #: lifespan) and is shared by every request thread.
     app.state.embedder = build_embedder(resolved.embedding)
+    #: Off unless configured; like the embedder, loaded once and shared.
+    app.state.reranker = build_reranker(resolved.rerank)
     #: Clients whose indices are known to exist, so a request does not re-check them.
     app.state.ensured_clients = WeakSet()
 
@@ -75,7 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 @asynccontextmanager
 async def _warm_embedder(app: FastAPI) -> AsyncIterator[None]:
-    """Load the query model before serving, so the first search does not pay for it.
+    """Load the query model (and reranker) before serving, so the first search does not pay.
 
     A server started by uvicorn runs this; a test client used without a ``with`` block does not,
     and its embedder (if any) loads on first use instead.
@@ -83,6 +86,9 @@ async def _warm_embedder(app: FastAPI) -> AsyncIterator[None]:
     embedder = getattr(app.state, "embedder", None)
     if embedder is not None:
         await run_in_threadpool(embedder.embed_query, "warm-up")
+    reranker = getattr(app.state, "reranker", None)
+    if reranker is not None:
+        await run_in_threadpool(reranker.score, "warm-up", ["warm-up"])
     yield
 
 

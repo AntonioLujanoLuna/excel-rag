@@ -24,7 +24,7 @@ _BUILDERS = sorted(
 
 
 def _saved_values_workbook(directory: Path) -> Path:
-    """Formula cells with each result type Excel saves: number, date, duration, text, bool, error."""
+    """Formula cells with each saved result type: number, date, duration, text, bool, error."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Types"

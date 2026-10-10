@@ -9,8 +9,8 @@ reader would otherwise parse the whole sheet into a tree to find.
 What it returns is *raw*: the cell type attribute and the ``<v>`` (or inline-string) text.
 Turning it into a Python value needs the cell's number format, which the formula load already has,
 so :func:`cached_value` does that conversion the way openpyxl's ``data_only`` load would. A
-shared-string result (``t="s"``, which Excel does not write for formula cells but another producer might) is
-reported as unsupported, and the reader falls back to openpyxl's load for that workbook.
+shared-string result (``t="s"``, which Excel does not write for formula cells but another producer
+might) is reported as unsupported, and the reader falls back to openpyxl's load for that workbook.
 
 Entity declarations are refused, as ``defusedxml`` would: a part that declares one raises
 :class:`~excel_rag.workbook.errors.WorkbookError`.

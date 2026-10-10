@@ -75,6 +75,10 @@ class RawTable:
     name: str
     ref: str
     columns: tuple[str, ...]
+    #: Rows above the data that hold the column names (``headerRowCount``: 0 or 1).
+    header_rows: int = 1
+    #: Rows below the data that hold the totals (``totalsRowCount``: 0 or 1).
+    totals_rows: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +512,8 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                     name=table.displayName or table_name,
                     ref=table.ref or "",
                     columns=columns,
+                    header_rows=1 if table.headerRowCount is None else int(table.headerRowCount),
+                    totals_rows=int(table.totalsRowCount or 0),
                 )
             )
 

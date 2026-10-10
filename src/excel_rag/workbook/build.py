@@ -9,7 +9,7 @@ one summary instead of 500 cell documents -- the design's "group repeated formul
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from openpyxl.formula.tokenizer import (  # type: ignore[import-untyped]
     Token,
@@ -139,13 +139,27 @@ def _build_tables(raw: RawWorkbook) -> dict[str, TableInfo]:
                 parsed = A1Range.parse(sheet.name, table.ref)
             except ValueError:
                 continue
-            info = TableInfo(table.name, sheet.name, parsed, table.columns)
+            info = TableInfo(
+                table.name,
+                sheet.name,
+                parsed,
+                table.columns,
+                header_rows=table.header_rows,
+                totals_rows=table.totals_rows,
+            )
             resolved[table.name] = info
             resolved[table.name.lower()] = info
     return resolved
 
 
-def _build_named_ranges(raw: RawWorkbook, workbook_id: str, version: int) -> tuple[NamedRange, ...]:
+def _build_named_ranges(
+    raw: RawWorkbook,
+    workbook_id: str,
+    version: int,
+    *,
+    sheet_max_row: Mapping[str, int],
+    sheet_max_col: Mapping[str, int],
+) -> tuple[NamedRange, ...]:
     known = frozenset(sheet.name for sheet in raw.sheets if not sheet.is_macro_sheet)
     names = [
         resolve_named_range(
@@ -155,6 +169,8 @@ def _build_named_ranges(raw: RawWorkbook, workbook_id: str, version: int) -> tup
             workbook_id=workbook_id,
             version=version,
             known_sheets=known,
+            sheet_max_row=sheet_max_row,
+            sheet_max_col=sheet_max_col,
         )
         for defined in raw.defined_names
     ]
@@ -177,7 +193,7 @@ def _build_formulas(
     entries: list[FormulaEntry] = []
     for pattern in sorted(groups):
         cells = sorted(groups[pattern], key=lambda cell: (cell.row, cell.column))
-        parsed: ParsedFormula = parse_formula(cells[0].formula or "", context)
+        parsed: ParsedFormula = parse_formula(cells[0].formula or "", context, row=cells[0].row)
         if len(cells) == 1:
             cell = cells[0]
             entries.append(
@@ -242,7 +258,18 @@ def build_model(
     known_sheets = frozenset(sheet.name for sheet in raw.sheets if not sheet.is_macro_sheet)
     macro_sheets = frozenset(raw.macro_sheet_names)
     tables = _build_tables(raw)
-    named_ranges = _build_named_ranges(raw, workbook_id, version)
+    sheet_max_row = {
+        sheet.name: (max((cell.row for cell in sheet.cells.values()), default=1))
+        for sheet in raw.sheets
+    }
+
+    sheet_max_col = {
+        sheet.name: (max((cell.column for cell in sheet.cells.values()), default=1))
+        for sheet in raw.sheets
+    }
+    named_ranges = _build_named_ranges(
+        raw, workbook_id, version, sheet_max_row=sheet_max_row, sheet_max_col=sheet_max_col
+    )
     resolved_names = [
         (
             name,
@@ -263,15 +290,6 @@ def build_model(
         (name.scope_sheet, name.name.lower()): info
         for name, info in resolved_names
         if name.scope_sheet is not None
-    }
-    sheet_max_row = {
-        sheet.name: (max((cell.row for cell in sheet.cells.values()), default=1))
-        for sheet in raw.sheets
-    }
-
-    sheet_max_col = {
-        sheet.name: (max((cell.column for cell in sheet.cells.values()), default=1))
-        for sheet in raw.sheets
     }
     sheet_order = tuple(sheet.name for sheet in raw.sheets)
     spill_extents: dict[tuple[str, str], A1Range] = {}

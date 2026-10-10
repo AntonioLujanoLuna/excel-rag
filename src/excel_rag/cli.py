@@ -156,8 +156,8 @@ def build_parser() -> argparse.ArgumentParser:
     diff_parser = subparsers.add_parser(
         "diff", help="what changed between two versions of a workbook (cells, formulas, impact)"
     )
-    diff_parser.add_argument("before", help="the earlier .xlsx/.xlsm")
-    diff_parser.add_argument("after", help="the later .xlsx/.xlsm")
+    diff_parser.add_argument("before", help="the earlier .xlsx/.xlsm/.xlsb/.csv")
+    diff_parser.add_argument("after", help="the later .xlsx/.xlsm/.xlsb/.csv")
     diff_parser.add_argument("--json", action="store_true", help="print the diff as JSON")
     diff_parser.add_argument(
         "--max-changes", type=int, default=500, help="list at most this many cell changes"

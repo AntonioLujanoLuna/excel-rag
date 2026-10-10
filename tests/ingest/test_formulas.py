@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import pytest
+
 from excel_rag.models import A1Range, ReferenceKind, UnresolvedReason
 from excel_rag.workbook.formulas import (
     FormulaContext,
     NamedRangeInfo,
     TableInfo,
     parse_formula,
+    resolve_named_range,
 )
 
 
@@ -121,35 +124,111 @@ def test_table_column_reference() -> None:
     reference = parsed.references[0].reference
     assert reference.kind is ReferenceKind.TABLE_COLUMN
     assert reference.sheet_name == "Actuals"
-    # The Revenue column only, not the whole table: a formula summing Revenue does not read Region.
-    assert reference.a1_range == "B1:B9"
+    # The Revenue column's data rows, not the whole table: summing Revenue does not read Region.
+    assert reference.a1_range == "B2:B9"
     assert reference.column_span == {"gte": 2, "lte": 2}
-    assert reference.row_span == {"gte": 1, "lte": 9}
+    assert reference.row_span == {"gte": 2, "lte": 9}
 
 
-def test_structured_reference_forms_resolve_to_their_columns() -> None:
-    context = _context(
-        tables={
-            "Sales": TableInfo(
-                "Sales",
-                "Actuals",
-                A1Range.parse("Actuals", "C3:F20"),
-                ("Region", "Units", "Unit Price", "Amount"),
-            )
-        }
+def _sales_context() -> FormulaContext:
+    # Header on row 3, data on 4..19, totals on 20.
+    sales = TableInfo(
+        "Sales",
+        "Actuals",
+        A1Range.parse("Actuals", "C3:F20"),
+        ("Region", "Units", "Unit Price", "Amount"),
+        totals_rows=1,
     )
+    return _context(sheet_name="Actuals", tables={"Sales": sales})
 
-    def ranges(formula: str) -> list[tuple[str, ReferenceKind]]:
-        parsed = parse_formula(formula, context)
-        assert parsed.unresolved == ()
-        return [(edge.reference.a1_range, edge.reference.kind) for edge in parsed.references]
 
-    column = [("F3:F20", ReferenceKind.TABLE_COLUMN)]
-    assert ranges("=Sales[[#This Row],[Amount]]") == column
-    assert ranges("=Sales[@Amount]*2") == column
-    assert ranges("=Sales[@[Unit Price]]") == [("E3:E20", ReferenceKind.TABLE_COLUMN)]
-    assert ranges("=SUM(Sales[[Units]:[Unit Price]])") == [("D3:E20", ReferenceKind.RANGE)]
-    assert ranges("=ROWS(Sales[#All])") == [("C3:F20", ReferenceKind.RANGE)]
+def _edges(formula: str, row: int | None = None) -> list[tuple[str, ReferenceKind, bool]]:
+    parsed = parse_formula(formula, _sales_context(), row=row)
+    assert parsed.unresolved == ()
+    return [
+        (edge.reference.a1_range, edge.reference.kind, edge.absolute) for edge in parsed.references
+    ]
+
+
+def test_structured_reference_columns_and_spans() -> None:
+    column = [("F4:F19", ReferenceKind.TABLE_COLUMN, True)]
+    assert _edges("=SUM(Sales[Amount])") == column
+    assert _edges("=SUM(Sales[[#Data],[Amount]])") == column
+    assert _edges("=Sales[@[Unit Price]]") == [("E4:E19", ReferenceKind.TABLE_COLUMN, True)]
+    assert _edges("=SUM(Sales[[Units]:[Unit Price]])") == [("D4:E19", ReferenceKind.RANGE, True)]
+
+
+def test_structured_reference_row_bands() -> None:
+    assert _edges("=Sales[[#Headers],[Amount]]") == [("F3", ReferenceKind.CELL, True)]
+    assert _edges("=Sales[[#Totals],[Amount]]") == [("F20", ReferenceKind.CELL, True)]
+    assert _edges("=SUM(Sales[[#Data],[#Totals],[Amount]])") == [
+        ("F4:F20", ReferenceKind.RANGE, True)
+    ]
+    assert _edges("=ROWS(Sales[#All])") == [("C3:F20", ReferenceKind.RANGE, True)]
+    assert _edges("=ROWS(Sales[])") == [("C4:F19", ReferenceKind.RANGE, True)]
+    assert _edges("=ROWS(Sales)") == [("C4:F19", ReferenceKind.RANGE, True)]
+
+
+def test_this_row_reads_the_formulas_own_row() -> None:
+    cell = [("F7", ReferenceKind.CELL, False)]
+    assert _edges("=Sales[[#This Row],[Amount]]", row=7) == cell
+    assert _edges("=Sales[@Amount]*2", row=7) == cell
+    assert _edges("=SUM(Sales[@[Units]:[Unit Price]])", row=7) == [
+        ("D7:E7", ReferenceKind.RANGE, False)
+    ]
+    # Without a row, or on a row outside the data, the column's data rows bound it.
+    column = [("F4:F19", ReferenceKind.TABLE_COLUMN, True)]
+    assert _edges("=Sales[@Amount]") == column
+    assert _edges("=Sales[@Amount]", row=25) == column
+
+
+def test_a_band_the_table_lacks_is_a_gap() -> None:
+    context = _context(
+        tables={"T": TableInfo("T", "Actuals", A1Range.parse("Actuals", "A1:B9"), ("A", "B"))}
+    )
+    parsed = parse_formula("=T[[#Totals],[B]]", context)
+    assert parsed.references == ()
+    assert [gap.reason for gap in parsed.unresolved] == [UnresolvedReason.MALFORMED]
+
+
+def test_unknown_table_column_is_a_gap() -> None:
+    parsed = parse_formula("=SUM(Sales[Nope])", _sales_context())
+    assert parsed.references == ()
+    assert [gap.reason for gap in parsed.unresolved] == [UnresolvedReason.OUT_OF_RANGE]
+
+
+@pytest.mark.parametrize(
+    ("definition", "a1"),
+    [
+        ("Actuals!$B$2:$C$9", "B2:C9"),
+        ("'Bob''s Sheet'!$A$1", "A1"),
+        ("Actuals!$A:$A", "A1:A40"),
+        ("Actuals!$C:$A", "A1:C40"),
+        ("Actuals!$2:$3", "A2:E3"),
+    ],
+)
+def test_named_range_targets(definition: str, a1: str) -> None:
+    named = resolve_named_range(
+        "N",
+        definition,
+        None,
+        workbook_id="wb",
+        version=1,
+        known_sheets=frozenset({"Actuals", "Bob's Sheet"}),
+        sheet_max_row={"Actuals": 40},
+        sheet_max_col={"Actuals": 5},
+    )
+    assert named.resolved, named.detail
+    assert named.a1 == a1
+
+
+@pytest.mark.parametrize("definition", ["Actuals!A1,Actuals!B2", "OFFSET(Actuals!A1,0,0,5)"])
+def test_named_range_that_is_not_a_rectangle_is_kept_as_a_gap(definition: str) -> None:
+    named = resolve_named_range(
+        "N", definition, None, workbook_id="wb", version=1, known_sheets=frozenset({"Actuals"})
+    )
+    assert not named.resolved
+    assert named.detail
 
 
 def test_whole_column_reference_expands_to_the_used_height() -> None:

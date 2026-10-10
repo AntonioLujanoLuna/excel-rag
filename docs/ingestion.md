@@ -164,6 +164,11 @@ nodes. openpyxl 3.1 keeps sheet-scoped names on the worksheet rather than the wo
 reads both. A bare name in a formula resolves to its own sheet's local name first and to the
 workbook-wide one otherwise, as Excel does; `Feb!Rate` resolves on `Feb`.
 
+A name resolves when it points at one rectangle on one sheet: a cell or range, whole columns
+(`Data!$A:$A`, clipped to the sheet's used height) or whole rows (`Data!$2:$3`, clipped to its used
+width). Anything else — a union, an `OFFSET` formula, a constant — is kept as a name node with the
+reason it did not resolve.
+
 ## Formula reference extraction
 
 Pure text analysis, never evaluation. Formulas are tokenised with openpyxl's
@@ -186,6 +191,18 @@ cannot be resolved statically becomes an `UnresolvedReference` with the right re
 | reference to a macro sheet | `macro_sheet` |
 | unknown sheet, table, column or name; a 3-D ref with unknown sheet order | `out_of_range` |
 | `#REF!`, a range across two sheets, a formula the tokenizer refuses | `malformed` |
+
+A structured reference resolves to the rows and columns it names, never to the whole table unless
+it says so. A table's rectangle is its header row, its data rows and its totals row (the counts are
+read from the table definition):
+
+| reference | reads |
+|---|---|
+| `Sales[Amount]`, `Sales[[#Data],[Amount]]` | the column's data rows (the table-column node) |
+| `Sales[[Units]:[Price]]` | those columns' data rows |
+| `Sales[[#Headers],[Amount]]`, `Sales[[#Totals],[Amount]]` | that header or totals cell (a gap if the table has none) |
+| `Sales[#All]`; `Sales[]` or a bare `Sales` | the whole rectangle; the data rows of every column |
+| `Sales[@Amount]`, `Sales[[#This Row],[Amount]]` | the cell in the formula's own row; a calculated column clusters into one edge over its rows |
 
 Inside `LET`/`LAMBDA` a bare identifier is a local variable, so it is not reported as an unknown name
 (the formula already carries its `dynamic_array` gap).

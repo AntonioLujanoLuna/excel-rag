@@ -53,8 +53,10 @@ headers, ACL scope and the embedding model that produced the vector.
 
 `excel_structure` holds what is *exact* — cells, ranges, tables, columns, named ranges, formulas —
 with `row_span`/`column_span` as `integer_range` fields, the cached value, the formula text, and
-`references` as nested typed edges. Unresolvable references (`INDIRECT`, volatile `OFFSET`,
-external links, unsupported dynamic arrays) are stored with their reason, never invented.
+`references` as nested typed edges. Charts, pivot tables and data validations carry the same
+edges, so "what reads this cell?" finds the chart that plots it as well as the formula that sums
+it. Unresolvable references (`INDIRECT`, volatile `OFFSET`, external links, unsupported dynamic
+arrays) are stored with their reason, never invented.
 
 Both mappings are data in `src/excel_rag/es.py`, and a test asserts the code only touches fields
 the mappings declare — Elasticsearch happily accepts a document whose unknown field can then never

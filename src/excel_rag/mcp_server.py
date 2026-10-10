@@ -187,13 +187,13 @@ def build_server(
     def precedents(path: str, sheet: str, range: str) -> str:
         """List the formulas inside a range with their saved values and the cells and ranges
         they read, resolved statically (INDIRECT and external links are reported, not
-        guessed)."""
+        guessed), and any chart, pivot table or validation in the range with what it reads."""
         return answer(lambda: catalog.session(path).precedents(sheet, range))
 
     @server.tool(annotations=read_only)
     def dependents(path: str, sheet: str, range: str) -> str:
-        """List the formulas anywhere in the workbook that read any cell of the range: what
-        changes if this input changes."""
+        """List the formulas, charts, pivot tables and data validations anywhere in the workbook
+        that read any cell of the range: what changes if this input changes."""
         return answer(lambda: catalog.session(path).dependents(sheet, range))
 
     @server.tool(name="diff_workbooks", annotations=read_only)

@@ -281,6 +281,30 @@ class TestDependents:
         assert self._dependents(test_client, "Actuals", "D100", acl_scopes=["hr-team"]) == set()
 
 
+class TestSheetObjectDependents:
+    """Charts, pivot tables and validations are dependents through the API like formulas."""
+
+    def test_the_objects_reading_a_cell_are_its_dependents(self, tmp_path: Path) -> None:
+        settings = Settings()
+        client = in_memory_client(settings)
+        ingest(client, settings, make_fixtures.sheet_objects(tmp_path), version=1)
+        app = create_app(settings)
+        app.state.client = client
+        response = TestClient(app).post(
+            "/api/v1/excel/dependents",
+            json={"workbook_id": WORKBOOK_ID, "sheet_name": "Data", "a1": "B3"},
+        )
+        assert response.status_code == 200, response.text
+        found = {
+            (node["node_type"], node["sheet"], node["a1_range"])
+            for node in response.json()["nodes"]
+        }
+        assert ("chart", "Data", "D2") in found
+        assert ("pivot_table", "Report", "A3:B8") in found
+        assert ("pivot_table", "Report", "D3:E8") in found
+        assert not any(node_type == "data_validation" for node_type, _, _ in found)
+
+
 class TestHybrid:
     """Vectors written by ingestion are the ones the service's knn query reads."""
 

@@ -69,6 +69,11 @@ def formula_node_id(workbook_id: str, version: int, sheet: str, coordinate: str)
     return node_id(workbook_id, version, "formula", f"{sheet}!{coordinate}")
 
 
+def sheet_object_node_id(workbook_id: str, version: int, kind: str, sheet: str, key: str) -> str:
+    """A chart (keyed by its ordinal), pivot table (its name) or validation (its cells)."""
+    return node_id(workbook_id, version, kind, f"{sheet}!{key}")
+
+
 def table_column_node_id(
     workbook_id: str, version: int, sheet: str, table: str, column: str
 ) -> str:
@@ -253,6 +258,31 @@ class FormulaEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class SheetObject:
+    """A chart, pivot table or data validation, and the ranges it reads.
+
+    ``anchor`` is where it sits (a chart's top-left cell, a pivot's location) or what it governs (a
+    validation's first range of cells). Its edges are resolved like a formula's, and kept apart
+    from formulas because it is not one: nothing here has a cached value or a formula text.
+    """
+
+    kind: str  # "chart" | "pivot_table" | "data_validation"
+    node_id: str
+    sheet_name: str
+    name: str
+    detail: str
+    anchor: A1Range
+    sources: tuple[str, ...]
+    references: tuple[Reference, ...]
+    unresolved_references: tuple[UnresolvedReference, ...]
+
+    @property
+    def label(self) -> str:
+        word = self.detail[:1].upper() + self.detail[1:]
+        return word if self.kind == "data_validation" else f"{word} {self.name!r}"
+
+
+@dataclass(frozen=True, slots=True)
 class SheetModel:
     """A worksheet after region detection."""
 
@@ -267,6 +297,7 @@ class SheetModel:
     declared_dimension_flagged: bool
     is_macro_sheet: bool
     table_names: tuple[str, ...] = ()
+    objects: tuple[SheetObject, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

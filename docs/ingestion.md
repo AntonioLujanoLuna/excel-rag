@@ -210,6 +210,25 @@ Inside `LET`/`LAMBDA` a bare identifier is a local variable, so it is not report
 A string literal is never scanned for references (`=IF(A1="B2",…)` yields only the `A1` edge), and
 duplicate edges are collapsed. Edges point at ranges, not cells.
 
+## Charts, pivot tables and data validation
+
+`workbook/objects.py`. Three things read ranges without being formulas, and each becomes a structure
+node with the same typed `references` edges a formula has — so `POST /api/v1/excel/dependents`, the
+`dependents` tool and reference expansion find them without knowing they exist:
+
+| object | node / chunk type | anchor | reads |
+|---|---|---|---|
+| chart | `chart` | its top-left cell | each series' title, categories and values (`<c:f>` texts), bubble sizes |
+| pivot table | `pivot_table` | its location | its cache's worksheet source: a range, a defined name, or a table (`Sales[#All]`: the header names its fields) |
+| data validation | `data_validation` | the cells it governs | `formula1`/`formula2` when they are not constants |
+
+The reference texts are resolved by the formula parser on the object's sheet, so the same rules
+and the same gaps apply: a validation list from `INDIRECT(…)` is an `indirect` gap, a pivot over an
+external connection or another workbook is an `external_link` gap. A constant list (`"a,b,c"`)
+reads no cell and is not an object. Nothing is refreshed or recalculated — a chart's cached points
+and a pivot's cached records are not read, only where they come from. A malformed object is skipped
+with a workbook warning that names it; at most 500 objects of each kind are read per sheet.
+
 ## Chunk text templates
 
 One region, one column, one row group and one formula summary, each including the sheet and the A1

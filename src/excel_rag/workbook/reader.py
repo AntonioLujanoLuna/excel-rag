@@ -49,6 +49,7 @@ from openpyxl.worksheet.formula import (  # type: ignore[import-untyped]
 from .canonical import CellValue
 from .errors import WorkbookError
 from .formats import looks_like_xlsb, read_csv_cells, read_xlsb_sheets, sheet_name_for
+from .objects import RawObject, read_sheet_objects
 from .sheetscan import SheetScan, cached_value, scan_sheet
 
 _XLNS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -103,6 +104,8 @@ class RawSheet:
     declared_dimension: str | None = None
     declared_dimension_flagged: bool = False
     is_macro_sheet: bool = False
+    #: Charts, pivot tables and data validations, with the reference texts they read.
+    objects: tuple[RawObject, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -439,6 +442,7 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
 
     macro_names = facts.macro_names
     sheets: list[RawSheet] = []
+    object_warnings: list[str] = []
     for ws in formula_wb.worksheets:
         name = ws.title
         fact = facts.by_name.get(name)
@@ -517,6 +521,8 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                 )
             )
 
+        objects, warnings_here = read_sheet_objects(ws)
+        object_warnings.extend(warnings_here)
         flagged = (
             declared_ref is not None
             and _dimension_area(declared_ref) > MAX_DECLARED_CELLS
@@ -532,6 +538,7 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
                 declared_dimension=declared_ref,
                 declared_dimension_flagged=flagged,
                 is_macro_sheet=False,
+                objects=objects,
             )
         )
 
@@ -558,5 +565,6 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
             f"sheet {sheet.name!r} declared dimension {sheet.declared_dimension!r}; ignored"
             for sheet in sheets
             if sheet.declared_dimension_flagged
-        ),
+        )
+        + tuple(object_warnings),
     )

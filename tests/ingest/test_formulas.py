@@ -98,17 +98,53 @@ def test_external_link_is_a_gap_and_its_sheet_is_not_parsed() -> None:
 
 
 def test_dynamic_forms_are_gaps() -> None:
-    let = parse_formula("=LET(x,1,x+1)", _context())
-    assert UnresolvedReason.DYNAMIC_ARRAY in {gap.reason for gap in let.unresolved}
     spill = parse_formula("=A1#", _context())
     assert UnresolvedReason.DYNAMIC_ARRAY in {gap.reason for gap in spill.unresolved}
     implicit = parse_formula("=@A1", _context())
     assert UnresolvedReason.DYNAMIC_ARRAY in {gap.reason for gap in implicit.unresolved}
 
 
-def test_unsupported_function_is_a_gap() -> None:
-    parsed = parse_formula("=_xlfn.CONCAT(A1,A2)", _context())
-    assert UnresolvedReason.UNSUPPORTED_FUNCTION in {gap.reason for gap in parsed.unresolved}
+def test_a_user_defined_function_is_a_gap() -> None:
+    parsed = parse_formula("=_xludf.MYFN(A1)", _context())
+    assert [edge.reference.a1_range for edge in parsed.references] == ["A1"]
+    assert [gap.reason for gap in parsed.unresolved] == [UnresolvedReason.UNSUPPORTED_FUNCTION]
+
+
+@pytest.mark.parametrize(
+    ("formula", "ranges"),
+    [
+        ("=_xlfn.CONCAT(A1,A2)", {"A1", "A2"}),
+        ("=_xlfn.XLOOKUP(A1,B1:B9,C1:C9)", {"A1", "B1:B9", "C1:C9"}),
+        ("=FILTER(A2:C10,B2:B10>5)", {"A2:C10", "B2:B10"}),
+        ("=_xlfn.SORT(_xlfn.UNIQUE(A2:A50))", {"A2:A50"}),
+        ("=MAP(A1:A5,LAMBDA(v,v+D1))", {"A1:A5", "D1"}),
+        ("=LET(x,A1:A10,y,B1,SUM(x)*y)", {"A1:A10", "B1"}),
+        ("=_xlfn.LET(_xlpm.x,A1:A10,SUM(_xlpm.x))", {"A1:A10"}),
+        ("=LET(x, (A1+A2), x)", {"A1", "A2"}),
+    ],
+)
+def test_a_built_in_or_dynamic_array_function_reads_exactly_its_arguments(
+    formula: str, ranges: set[str]
+) -> None:
+    # Its precedents are its arguments, all resolved; only its result's extent is dynamic.
+    parsed = parse_formula(formula, _context())
+    assert {edge.reference.a1_range for edge in parsed.references} == ranges
+    assert parsed.unresolved == ()
+
+
+def test_a_let_variable_never_becomes_an_edge_to_a_workbook_name() -> None:
+    context = _context(
+        defined_names={
+            "rate": NamedRangeInfo("Rate", "Assumptions", A1Range.parse("Assumptions", "C7"))
+        }
+    )
+    shadowed = parse_formula("=LET(rate, 0.1, rate*A1)", context)
+    assert [edge.reference.a1_range for edge in shadowed.references] == ["A1"]
+    # Outside the binding, the same spelling is the workbook name.
+    named = parse_formula("=LET(x, B2, x*Rate)", context)
+    assert {edge.reference.a1_range for edge in named.references} == {"B2", "C7"}
+    lambda_ = parse_formula("=LAMBDA(rate, rate*2)(A1)", context)
+    assert [edge.reference.a1_range for edge in lambda_.references] == ["A1"]
 
 
 def test_table_column_reference() -> None:
@@ -333,7 +369,10 @@ def test_an_undefined_name_is_a_gap_but_a_let_variable_is_not() -> None:
     assert [gap.reference_text for gap in undefined.unresolved] == ["Rate"]
     let = parse_formula("=LET(rate, B2, rate*2)", _context())
     assert [edge.reference.a1_range for edge in let.references] == ["B2"]
-    assert {gap.reason for gap in let.unresolved} == {UnresolvedReason.DYNAMIC_ARRAY}
+    assert let.unresolved == ()
+    # An undefined name inside a LET is still a gap: only the bound names are variables.
+    unbound = parse_formula("=LET(x, B2, x*Rate)", _context())
+    assert [gap.reference_text for gap in unbound.unresolved] == ["Rate"]
 
 
 def test_an_untokenisable_formula_is_one_gap_and_no_edges() -> None:

@@ -165,6 +165,7 @@ def _hit(ranked: RankedCandidate, related_node_ids: tuple[str, ...], query: str)
     return Hit(
         chunk_id=chunk.id,
         score=ranked.score,
+        score_kind=ranked.score_kind,
         content=chunk.content,
         source=SourceRef(
             workbook_id=chunk.workbook_id,

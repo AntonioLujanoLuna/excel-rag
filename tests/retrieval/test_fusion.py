@@ -90,3 +90,16 @@ class TestMatchedFields:
         chunk = _chunk("a", title="Projected revenue")
         assert matched_fields("income", chunk, vector_matched=True) == ("embedding",)
         assert matched_fields("revenue", chunk, vector_matched=True) == ("title", "embedding")
+
+
+class TestMatchedFieldsTokens:
+    def test_punctuation_splits_tokens_as_the_standard_analyzer_does(self) -> None:
+        chunk = _chunk("a", title="x", content="Revenue/cost per Q1-2026 (USD)")
+        assert matched_fields("cost", chunk) == ("content",)
+        assert matched_fields("2026", chunk) == ("content",)
+        assert matched_fields("usd", chunk) == ("content",)
+
+    def test_non_ascii_words_are_whole_tokens(self) -> None:
+        chunk = _chunk("a", title="Previsión de ingresos", content="c")
+        assert matched_fields("previsión", chunk) == ("title",)
+        assert matched_fields("prevision", chunk) == ()

@@ -127,3 +127,34 @@ def test_source_metadata_is_recorded(build) -> None:
     raw = read_workbook(build.path("two_tables_one_sheet"))
     assert raw.source_file == "two_tables.xlsx"
     assert len(raw.source_sha256) == 64
+
+
+_LAUGHS = (
+    b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol">'
+    b'<!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">]>'
+)
+
+
+@pytest.mark.parametrize("part", ["[Content_Types].xml", "xl/workbook.xml"])
+def test_an_entity_declaring_part_is_refused_not_expanded(build, tmp_path, part) -> None:
+    from fixtures.make_fixtures import _rewrite_zip
+
+    def bomb(data: bytes) -> bytes:
+        body = data.split(b"?>", 1)[1] if data.startswith(b"<?xml") else data
+        return _LAUGHS + body
+
+    path = _rewrite_zip(build.path("named_range"), tmp_path / "laughs.xlsx", edits={part: bomb})
+    with pytest.raises(IngestError, match="XML entities"):
+        read_workbook(path)
+
+
+def test_a_part_that_is_not_xml_fails_loudly(build, tmp_path) -> None:
+    from fixtures.make_fixtures import _rewrite_zip
+
+    path = _rewrite_zip(
+        build.path("named_range"),
+        tmp_path / "broken.xlsx",
+        edits={"[Content_Types].xml": b"<Types"},
+    )
+    with pytest.raises(IngestError, match="not XML"):
+        read_workbook(path)

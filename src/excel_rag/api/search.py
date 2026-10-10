@@ -30,9 +30,10 @@ def search_excel(
 ) -> SearchResponse:
     """Search the semantic index and, if asked, expand related structural nodes.
 
-    The HTTP request carries no query vector -- the frozen :class:`~excel_rag.models.SearchRequest`
-    has no such field -- so this endpoint runs the lexical path. A caller that embeds the query
-    itself reaches the hybrid path through :meth:`RetrievalService.search`.
+    The HTTP request carries text only -- the frozen :class:`~excel_rag.models.SearchRequest` has no
+    vector field. With an embedder configured the service embeds the query and runs the hybrid
+    (BM25 + ``knn``, fused by RRF) path; without one it runs the lexical path. Each hit's
+    ``score_kind`` says which.
 
     ``filters.acl_scopes`` is checked against the caller: a restricted caller may narrow its scopes
     but never name one it does not hold, and is filtered by all of its scopes when it names none.

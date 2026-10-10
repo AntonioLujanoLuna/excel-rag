@@ -18,10 +18,11 @@ by an artefact of two unrelated spaces.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..models import ChunkDocument
+from ..models import ChunkDocument, ScoreKind
 
 #: The RRF smoothing constant. 60 is the value from the original Cormack et al. paper; it keeps any
 #: single retriever's top hit from dominating and is stable across candidate-window sizes.
@@ -47,6 +48,7 @@ class RankedCandidate:
     candidate: Candidate
     score: float
     vector_matched: bool
+    score_kind: ScoreKind = "lexical"
 
 
 def fuse(
@@ -95,6 +97,7 @@ def fuse(
             ),
             score=score,
             vector_matched=chunk_id in vector_scores,
+            score_kind="rrf",
         )
         for chunk_id, score in fused.items()
     ]
@@ -125,8 +128,13 @@ def matched_fields(
     return tuple(fields)
 
 
+#: Word characters, as Elasticsearch's ``standard`` analyzer splits them (Unicode-aware), so
+#: ``revenue/cost`` is two tokens and ``Q1-2026`` matches ``2026``.
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
 def _tokens(text: str) -> set[str]:
-    return {token.strip(".,;:()?!\"'") for token in text.lower().split() if token.strip()}
+    return set(_TOKEN_RE.findall(text.lower()))
 
 
 __all__ = [

@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -388,11 +388,18 @@ class NodePayload(BaseModel):
     depth: int = 0
 
 
+#: What a hit's ``score`` measures. ``lexical``: the index's own BM25 score (no vector ran);
+#: ``rrf``: the reciprocal-rank fusion of the lexical and vector lists; ``rerank``: a
+#: cross-encoder's relevance score. Scores of different kinds are not comparable.
+ScoreKind = Literal["lexical", "rrf", "rerank"]
+
+
 class Hit(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     chunk_id: str
     score: float
+    score_kind: ScoreKind = "lexical"
     content: str
     source: SourceRef
     node_id: str

@@ -34,7 +34,7 @@ Response fields:
 
 | field | meaning |
 |---|---|
-| `hits[]` | scored chunks. `source` carries `workbook_id`/`version`/`sheet`/`a1_range`; `node_id` links to the structural node; `related_node_ids` are the expansions that came back from this hit. |
+| `hits[]` | scored chunks. `source` carries `workbook_id`/`version`/`sheet`/`a1_range`; `node_id` links to the structural node; `related_node_ids` are the expansions that came back from this hit. `score_kind` says what `score` measures — `lexical` (BM25, no vector ran), `rrf` (fused rank) or `rerank` (cross-encoder) — and scores of different kinds are not comparable. |
 | `nodes` | the exact structural payloads, keyed by node id: cached value, display value, formula, table/column/named-range, references, and the `depth` at which the expansion found them. |
 | `unresolved_references[]` | references that could not be resolved to a node (with the reason). Never dropped. |
 | `truncation` | `{truncated, reason, dropped_nodes, depth_limit, bytes_returned}` — what the budgets dropped and why. |

@@ -12,6 +12,8 @@ Three rules govern this module:
   its text, and the other cells of its saved extent are *computed* cells: their value is the one
   Excel last saved, labelled as cached and pointing at the formula that produced it -- never
   mistaken for input data.
+* Package XML is parsed with ``defusedxml`` (no entity expansion), and openpyxl uses it too once it
+  is installed, so a billion-laughs part is refused rather than expanded.
 * A declared dimension is not trusted. openpyxl already ignores ``<dimension ref="A1:XFD1048576">``,
   so nothing is allocated for it; we read the string from the package only to *report* that a
   hostile dimension was declared and ignored.
@@ -26,9 +28,11 @@ import zipfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
+from xml.etree.ElementTree import Element, ParseError
 
 import openpyxl  # type: ignore[import-untyped]
+from defusedxml import DefusedXmlException  # type: ignore[import-untyped]
+from defusedxml.ElementTree import fromstring as _fromstring  # type: ignore[import-untyped]
 from openpyxl.utils import get_column_letter  # type: ignore[import-untyped]
 from openpyxl.utils.exceptions import InvalidFileException  # type: ignore[import-untyped]
 from openpyxl.worksheet.formula import (  # type: ignore[import-untyped]
@@ -223,6 +227,19 @@ def _mark_array_extents(cells: dict[str, CellValue], extents: dict[str, str]) ->
             )
 
 
+def _parse_xml(data: bytes, part: str) -> Element:
+    """Parse one package part with ``defusedxml``: no entity expansion, no external entities.
+
+    A malformed or hostile part is a :class:`WorkbookError` like any other unreadable package.
+    """
+    try:
+        return _fromstring(data)  # type: ignore[no-any-return]
+    except DefusedXmlException as exc:
+        raise WorkbookError(f"refusing workbook: {part} declares XML entities ({exc})") from exc
+    except ParseError as exc:
+        raise WorkbookError(f"not a valid workbook package: {part} is not XML ({exc})") from exc
+
+
 def _read_package(data: bytes) -> _PackageFacts:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -243,7 +260,7 @@ def _read_package(data: bytes) -> _PackageFacts:
 
     relationships: dict[str, tuple[str, str]] = {}
     if "xl/_rels/workbook.xml.rels" in names:
-        rels = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rels = _parse_xml(archive.read("xl/_rels/workbook.xml.rels"), "xl/_rels/workbook.xml.rels")
         for node in rels:
             resolved = node.attrib.get("Target", "")
             target = resolved.lstrip("/")
@@ -253,7 +270,7 @@ def _read_package(data: bytes) -> _PackageFacts:
 
     content_types: dict[str, str] = {}
     if "[Content_Types].xml" in names:
-        types = ElementTree.fromstring(archive.read("[Content_Types].xml"))
+        types = _parse_xml(archive.read("[Content_Types].xml"), "[Content_Types].xml")
         for node in types:
             part = node.attrib.get("PartName")
             if part:
@@ -261,7 +278,7 @@ def _read_package(data: bytes) -> _PackageFacts:
 
     sheets: list[_SheetFact] = []
     declared: dict[str, str] = {}
-    workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+    workbook = _parse_xml(archive.read("xl/workbook.xml"), "xl/workbook.xml")
     sheet_container = workbook.find(f"{{{_XLNS}}}sheets")
     if sheet_container is not None:
         for node in sheet_container:
@@ -283,8 +300,8 @@ def _read_package(data: bytes) -> _PackageFacts:
             )
             if target in names:
                 try:
-                    part_root = ElementTree.fromstring(archive.read(target))
-                except ElementTree.ParseError:
+                    part_root: Element | None = _parse_xml(archive.read(target), target)
+                except WorkbookError:
                     part_root = None
                 if part_root is not None:
                     dimension = part_root.find(f"{{{_XLNS}}}dimension")
@@ -300,7 +317,16 @@ def _load(data: bytes, *, data_only: bool) -> Any:
         return openpyxl.load_workbook(
             io.BytesIO(data), data_only=data_only, keep_vba=False, read_only=False
         )
-    except (InvalidFileException, zipfile.BadZipFile, KeyError, ValueError, OSError) as exc:
+    except DefusedXmlException as exc:
+        raise WorkbookError(f"refusing workbook: a part declares XML entities ({exc})") from exc
+    except (
+        InvalidFileException,
+        zipfile.BadZipFile,
+        KeyError,
+        ValueError,
+        OSError,
+        ParseError,
+    ) as exc:
         raise WorkbookError(f"could not read the workbook: {exc}") from exc
 
 

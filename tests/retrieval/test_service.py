@@ -136,6 +136,12 @@ class TestEmbedder:
         secret = next(hit for hit in response.hits if hit.chunk_id == C_SECRET)
         assert "embedding" in secret.matched_fields
         assert response.es_requests >= 3, "manifest, lexical and knn"
+        assert {hit.score_kind for hit in response.hits} == {"rrf"}
+
+    def test_a_lexical_only_hit_says_its_score_is_lexical(self, settings: Settings, client) -> None:
+        response = _service(settings, client).search(_request(include_structure=False))
+        assert response.hits
+        assert {hit.score_kind for hit in response.hits} == {"lexical"}
 
     def test_without_an_embedder_no_knn_is_issued(self, settings: Settings, client) -> None:
         before = len(client.calls)

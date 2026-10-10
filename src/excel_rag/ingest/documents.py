@@ -35,6 +35,7 @@ from ..workbook.canonical import (
     RegionKind,
     RowGroup,
     SheetModel,
+    SheetObject,
     WorkbookModel,
     cell_node_id,
     chunk_id,
@@ -363,6 +364,8 @@ def _build_sheet(builder: _Builder, model: WorkbookModel, sheet: SheetModel) -> 
         _build_region(builder, sheet, region)
     for entry in sheet.formulas:
         _build_formula(builder, sheet, entry)
+    for item in sheet.objects:
+        _build_object(builder, sheet, item)
     _build_important_cells(builder, model, sheet)
 
 
@@ -515,6 +518,53 @@ def _build_formula(builder: _Builder, sheet: SheetModel, entry: FormulaEntry) ->
     )
 
 
+#: How each kind of sheet object relates to the ranges it reads, for its chunk text.
+_OBJECT_VERBS = {
+    "chart": "plots",
+    "pivot_table": "summarises",
+    "data_validation": "takes its allowed values or rule from",
+}
+
+
+def _object_text(item: SheetObject) -> str:
+    where = "applies to" if item.kind == "data_validation" else "sits at"
+    parts = [f"{item.label} on worksheet {item.sheet_name} {where} {item.anchor.a1}."]
+    if item.references:
+        reads = ", ".join(
+            f"{reference.sheet_name}!{reference.a1_range}" for reference in item.references
+        )
+        parts.append(f"It {_OBJECT_VERBS.get(item.kind, 'reads')} {reads}.")
+    if item.unresolved_references:
+        gaps = ", ".join(
+            f"{gap.reference_text} ({gap.reason.value})" for gap in item.unresolved_references
+        )
+        parts.append(f"Unresolved: {gaps}.")
+    return " ".join(parts)
+
+
+def _build_object(builder: _Builder, sheet: SheetModel, item: SheetObject) -> None:
+    builder.add_sheet_node(
+        node_id=item.node_id,
+        node_type=NodeType(item.kind),
+        sheet_id=sheet.node_id,
+        sheet_name=sheet.name,
+        a1=item.anchor,
+        parent_id=sheet.node_id,
+        references=item.references,
+        unresolved_references=item.unresolved_references,
+    )
+    builder.add_chunk(
+        key=f"{item.kind}:{item.node_id}",
+        node_id=item.node_id,
+        sheet_id=sheet.node_id,
+        sheet_name=sheet.name,
+        a1_range=item.anchor.a1,
+        chunk_type=ChunkType(item.kind),
+        title=f"{item.label} on {sheet.name}",
+        content=_object_text(item),
+    )
+
+
 def _header_coordinates(sheet: SheetModel) -> dict[str, str]:
     coordinates: dict[str, str] = {}
     for region in sheet.regions:
@@ -574,7 +624,8 @@ def _materialize_reference_targets(builder: _Builder, model: WorkbookModel) -> N
     for sheet in model.sheets:
         if sheet.is_macro_sheet:
             continue
-        for entry in sheet.formulas:
+        readers: list[FormulaEntry | SheetObject] = [*sheet.formulas, *sheet.objects]
+        for entry in readers:
             for reference in entry.references:
                 wanted.setdefault(
                     reference.target_node_id,

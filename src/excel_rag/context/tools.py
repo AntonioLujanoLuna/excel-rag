@@ -20,8 +20,15 @@ from typing import Any
 
 from ..models import A1Range
 from ..workbook import WorkbookModel, load_workbook
-from ..workbook.canonical import FormulaEntry, SheetModel, column_letter
-from .render import DETAIL_LADDER, FORMULA_MARK, _display, _qualified, formula_line
+from ..workbook.canonical import FormulaEntry, SheetModel, SheetObject, column_letter
+from .render import (
+    DETAIL_LADDER,
+    FORMULA_MARK,
+    _display,
+    _qualified,
+    formula_line,
+    object_line,
+)
 
 #: The most cells one ``read_range`` returns; a larger range is cut by rows, and the reply says so.
 MAX_RANGE_CELLS = 2_000
@@ -88,7 +95,8 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
             "List the formulas inside a range of the attached workbook, each with its saved "
             "value and the cells and ranges it reads (its precedents), resolved statically - "
             "references such as INDIRECT or external links are reported as unresolved, never "
-            "guessed. Use it to explain how a value is calculated."
+            "guessed; a chart, pivot table or data validation in the range is listed with the "
+            "ranges it reads. Use it to explain how a value is calculated."
         ),
         "input_schema": _schema({"sheet": _SHEET, "range": _RANGE}),
         "strict": True,
@@ -97,8 +105,9 @@ TOOL_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "name": "dependents",
         "description": (
             "List the formulas anywhere in the attached workbook that read any cell of a range "
-            "(its direct dependents), with their saved values. Use it to answer what changes if "
-            "an input changes; call it again on a dependent to follow the chain further."
+            "(its direct dependents), with their saved values, and the charts, pivot tables and "
+            "data validations that read it. Use it to answer what changes if an input changes; "
+            "call it again on a dependent to follow the chain further."
         ),
         "input_schema": _schema({"sheet": _SHEET, "range": _RANGE}),
         "strict": True,
@@ -258,9 +267,10 @@ class WorkbookSession:
         region = _parse(sheet.name, a1)
         where = _qualified(sheet.name, region.a1)
         entries = [entry for entry in sheet.formulas if entry.a1_range.intersects(region)]
-        if not entries:
+        objects = [item for item in sheet.objects if item.anchor.intersects(region)]
+        if not entries and not objects:
             return f"{where} holds no formulas: its values are inputs, not calculations."
-        lines = [f"Formulas in {where} and what they read:"]
+        lines = [f"Formulas in {where} and what they read:"] if entries else []
         for entry in entries[:MAX_FORMULAS]:
             lines.append(f"- {formula_line(entry, qualified=True)}")
             for reference in dict.fromkeys(
@@ -269,6 +279,13 @@ class WorkbookSession:
                 lines.append(f"    - {self._preview(*reference)}")
         if len(entries) > MAX_FORMULAS:
             lines.append(f"({len(entries) - MAX_FORMULAS} more formula(s) not shown.)")
+        if objects:
+            lines.append(f"Charts, pivot tables and validations at {where} and what they read:")
+            lines.extend(
+                f"- {object_line(item, qualified=True)}" for item in objects[:MAX_FORMULAS]
+            )
+            if len(objects) > MAX_FORMULAS:
+                lines.append(f"({len(objects) - MAX_FORMULAS} more not shown.)")
         return "\n".join(lines)
 
     def dependents(self, sheet_name: str, a1: str) -> str:
@@ -281,12 +298,29 @@ class WorkbookSession:
             for entry in other.formulas
             if any(_reads(reference, region) for reference in entry.references)
         ]
-        if not found:
-            return f"No formula reads {where}."
-        lines = [f"Formulas that read {where}:"]
-        lines.extend(f"- {formula_line(entry, qualified=True)}" for entry in found[:MAX_FORMULAS])
-        if len(found) > MAX_FORMULAS:
-            lines.append(f"({len(found) - MAX_FORMULAS} more formula(s) not shown.)")
+        readers: list[SheetObject] = [
+            item
+            for other in self.model.sheets
+            for item in other.objects
+            if any(_reads(reference, region) for reference in item.references)
+        ]
+        if not found and not readers:
+            return f"No formula, chart, pivot table or validation reads {where}."
+        lines: list[str] = []
+        if found:
+            lines.append(f"Formulas that read {where}:")
+            lines.extend(
+                f"- {formula_line(entry, qualified=True)}" for entry in found[:MAX_FORMULAS]
+            )
+            if len(found) > MAX_FORMULAS:
+                lines.append(f"({len(found) - MAX_FORMULAS} more formula(s) not shown.)")
+        if readers:
+            lines.append(f"Charts, pivot tables and validations that read {where}:")
+            lines.extend(
+                f"- {object_line(item, qualified=True)}" for item in readers[:MAX_FORMULAS]
+            )
+            if len(readers) > MAX_FORMULAS:
+                lines.append(f"({len(readers) - MAX_FORMULAS} more not shown.)")
         return "\n".join(lines)
 
     # -- helpers ----------------------------------------------------------------------------

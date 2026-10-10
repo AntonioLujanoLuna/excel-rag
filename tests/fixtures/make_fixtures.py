@@ -471,3 +471,93 @@ def csv_file(directory: Path) -> Path:
         "9;Este;1.5e3;TRUE;3/4\n".encode()
     )
     return path
+
+
+def sheet_objects(directory: Path) -> Path:
+    """Charts, pivot tables and data validations that read ranges.
+
+    ``Data`` holds the ``Sales`` table (A1:B5) with a bar chart at D2 plotting B2:B5 against
+    A2:A5, a list validation on C2:C5 drawing from ``Lists!A1:A2``, a constant-list validation on
+    E2 (reads nothing) and an ``INDIRECT`` validation on F2 (a gap). ``Report`` holds a pivot over
+    ``Data!A1:B5``, a pivot over the ``Sales`` table by name, and one over an external connection.
+    """
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.pivot.cache import (
+        CacheDefinition,
+        CacheField,
+        CacheSource,
+        SharedItems,
+        WorksheetSource,
+    )
+    from openpyxl.pivot.record import RecordList
+    from openpyxl.pivot.table import DataField, Location, PivotField, RowColField, TableDefinition
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    wb = openpyxl.Workbook()
+    data = wb.active
+    data.title = "Data"
+    data.append(["Month", "Revenue"])
+    for month, revenue in (("Jan", 100), ("Feb", 120), ("Mar", 90), ("Apr", 140)):
+        data.append([month, revenue])
+    data.add_table(Table(displayName="Sales", ref="A1:B5"))
+    chart = BarChart()
+    chart.title = "Revenue by month"
+    chart.add_data(Reference(data, min_col=2, min_row=1, max_row=5), titles_from_data=True)
+    chart.set_categories(Reference(data, min_col=1, min_row=2, max_row=5))
+    data.add_chart(chart, "D2")
+    for formula, cells in (
+        ("=Lists!$A$1:$A$2", "C2:C5"),
+        ('"a,b,c"', "E2"),
+        ('=INDIRECT("Lists!A1:A2")', "F2"),
+    ):
+        validation = DataValidation(type="list", formula1=formula)
+        validation.add(cells)
+        data.add_data_validation(validation)
+
+    lists = wb.create_sheet("Lists")
+    lists.append(["North"])
+    lists.append(["South"])
+
+    report = wb.create_sheet("Report")
+    report["A1"] = "Revenue report"
+
+    def pivot(name: str, cache_id: int, location: str, source: CacheSource) -> TableDefinition:
+        cache = CacheDefinition(
+            cacheSource=source,
+            cacheFields=[
+                CacheField(name="Month", sharedItems=SharedItems()),
+                CacheField(name="Revenue", sharedItems=SharedItems()),
+            ],
+            recordCount=0,
+        )
+        cache.records = RecordList()
+        table = TableDefinition(
+            name=name,
+            cacheId=cache_id,
+            dataCaption="Values",
+            location=Location(ref=location, firstHeaderRow=1, firstDataRow=1, firstDataCol=1),
+            pivotFields=[
+                PivotField(axis="axisRow", showAll=False),
+                PivotField(dataField=True, showAll=False),
+            ],
+            rowFields=[RowColField(x=0)],
+            dataFields=[DataField(name="Sum of Revenue", fld=1)],
+        )
+        table.cache = cache
+        return table
+
+    worksheet = CacheSource(
+        type="worksheet", worksheetSource=WorksheetSource(ref="A1:B5", sheet="Data")
+    )
+    by_name = CacheSource(type="worksheet", worksheetSource=WorksheetSource(name="Sales"))
+    external = CacheSource(type="external", connectionId=1)
+    report._pivots.extend(
+        [
+            pivot("RevenuePivot", 1, "A3:B8", worksheet),
+            pivot("TablePivot", 2, "D3:E8", by_name),
+            pivot("CubePivot", 3, "G3:H8", external),
+        ]
+    )
+    path = directory / "sheet_objects.xlsx"
+    wb.save(path)
+    return path

@@ -33,6 +33,7 @@ from ..workbook.canonical import (
     Region,
     RegionKind,
     SheetModel,
+    SheetObject,
     column_letter,
 )
 
@@ -213,6 +214,7 @@ def _sheet(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
     hidden = "" if sheet.visibility == "visible" else f", {sheet.visibility}"
     out.add(f"## Sheet {_quote(sheet.name)} - used range {used}{hidden}")
     if not sheet.cells:
+        _objects(out, sheet, detail)
         out.add()
         return
     if not detail.schemas:
@@ -224,6 +226,7 @@ def _sheet(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
         _region(out, sheet, region, detail)
     _other_cells(out, sheet, detail)
     _formulas(out, sheet, detail)
+    _objects(out, sheet, detail)
     out.add()
 
 
@@ -352,6 +355,46 @@ def _formulas(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
         out.omit(f"({len(sheet.formulas) - len(entries)} more formula(s) omitted.)")
 
 
+def _objects(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
+    if not sheet.objects:
+        return
+    limit = detail.max_formulas
+    items = list(sheet.objects) if limit is None else list(sheet.objects)[:limit]
+    if items:
+        out.add("Charts, pivot tables and validations:")
+        out.lines.extend(f"- {object_line(item)}" for item in items)
+    if len(items) < len(sheet.objects):
+        out.omit(
+            f"({len(sheet.objects) - len(items)} more chart(s)/pivot(s)/validation(s) omitted.)"
+        )
+
+
+#: What a sheet object does with the ranges it reads.
+_OBJECT_VERBS = {"chart": "plots", "pivot_table": "summarises", "data_validation": "values from"}
+
+
+def object_line(item: SheetObject, *, qualified: bool = False) -> str:
+    """One chart, pivot table or validation: what and where it is, and what it reads."""
+    where = _qualified(item.sheet_name, item.anchor.a1) if qualified else item.anchor.a1
+    preposition = "on" if item.kind == "data_validation" else "at"
+    line = f"{item.label} {preposition} {where}"
+    reads = ", ".join(
+        dict.fromkeys(
+            _qualified(reference.sheet_name, reference.a1_range) for reference in item.references
+        )
+    )
+    if reads:
+        line += f": {_OBJECT_VERBS.get(item.kind, 'reads')} {reads}"
+    if item.unresolved_references:
+        gaps = ", ".join(
+            dict.fromkeys(
+                f"{gap.reference_text} ({gap.reason.value})" for gap in item.unresolved_references
+            )
+        )
+        line += f"; unresolved: {gaps}"
+    return line
+
+
 def formula_line(
     entry: FormulaEntry, *, qualified: bool = False, max_chars: int | None = None
 ) -> str:
@@ -476,5 +519,6 @@ __all__ = [
     "TokenCounter",
     "approx_tokens",
     "formula_line",
+    "object_line",
     "render_workbook",
 ]

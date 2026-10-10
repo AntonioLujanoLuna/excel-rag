@@ -76,8 +76,8 @@ Messages API's `count_tokens` endpoint for the model you will call.
 |---|---|
 | `read_range(sheet, range)` | a grid of the rectangle, with the formulas inside it; at most 2,000 cells, cut by rows with the next range named |
 | `find(query)` | cells (value or formula) and named ranges containing the text; at most 50 matches, with the total |
-| `precedents(sheet, range)` | the formulas in the range, their saved values and what they read, with single-cell precedents' values |
-| `dependents(sheet, range)` | the formulas anywhere that read any cell of the range — `D100` finds a formula reading `D2:D500` |
+| `precedents(sheet, range)` | the formulas in the range, their saved values and what they read, with single-cell precedents' values; a chart, pivot table or validation in the range, with what it reads |
+| `dependents(sheet, range)` | the formulas, charts, pivot tables and data validations anywhere that read any cell of the range — `D100` finds a formula reading `D2:D500` |
 
 The definitions are plain dicts in the Messages API shape with `strict: true` and every field
 required. A bad call (unknown sheet, malformed range, extra argument) is returned as a

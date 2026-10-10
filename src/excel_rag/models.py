@@ -57,6 +57,10 @@ class ChunkType(StrEnum):
     COLUMN = "column"
     ROW_GROUP = "row_group"
     FORMULA_SUMMARY = "formula_summary"
+    #: A chart, pivot table or data validation: what it is and the ranges it reads.
+    CHART = "chart"
+    PIVOT_TABLE = "pivot_table"
+    DATA_VALIDATION = "data_validation"
 
 
 class NodeType(StrEnum):
@@ -70,6 +74,9 @@ class NodeType(StrEnum):
     RANGE = "range"
     FORMULA = "formula"
     NAMED_RANGE = "named_range"
+    CHART = "chart"
+    PIVOT_TABLE = "pivot_table"
+    DATA_VALIDATION = "data_validation"
 
 
 class ReferenceKind(StrEnum):

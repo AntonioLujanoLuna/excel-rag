@@ -17,19 +17,21 @@ from openpyxl.formula.tokenizer import (  # type: ignore[import-untyped]
     TokenizerError,
 )
 
-from ..models import A1Range, Reference, ReferenceKind
+from ..models import A1Range, Reference, ReferenceKind, UnresolvedReason, UnresolvedReference
 from .canonical import (
     CellValue,
     FormulaEntry,
     NamedRange,
     Region,
     SheetModel,
+    SheetObject,
     WorkbookModel,
     cell_node_id,
     column_letter,
     formula_node_id,
     range_node_id,
     sheet_node_id,
+    sheet_object_node_id,
 )
 from .formulas import (
     FormulaContext,
@@ -245,6 +247,62 @@ def _build_formulas(
     return tuple(entries)
 
 
+def _build_objects(sheet: RawSheet, context: FormulaContext) -> tuple[SheetObject, ...]:
+    """Resolve each chart's, pivot table's and validation's sources as formulas on its sheet."""
+    built: list[SheetObject] = []
+    for raw in sheet.objects:
+        anchor = _anchor_range(sheet.name, raw.anchor, context.sheet_max_row.get(sheet.name, 1))
+        references: dict[tuple[str, str, str], Reference] = {}
+        unresolved: list[UnresolvedReference] = []
+        for source in raw.sources:
+            if raw.kind == "pivot_table" and source.lower() in context.tables:
+                # A pivot over a table reads its header row too: its field names come from it.
+                source = f"{source}[#All]"
+            parsed = parse_formula(source, context, row=anchor.min_row)
+            for edge in parsed.references:
+                reference = edge.reference
+                key = (reference.target_node_id, reference.a1_range, reference.kind.value)
+                references.setdefault(key, reference)
+            unresolved.extend(parsed.unresolved)
+        unresolved.extend(
+            UnresolvedReference(
+                reference_text=text,
+                reason=UnresolvedReason.EXTERNAL_LINK,
+                detail=f"the {raw.detail}'s source is not a range in this workbook",
+            )
+            for text in raw.unreadable
+        )
+        built.append(
+            SheetObject(
+                kind=raw.kind,
+                node_id=sheet_object_node_id(
+                    context.workbook_id, context.version, raw.kind, sheet.name, raw.key
+                ),
+                sheet_name=sheet.name,
+                name=raw.name,
+                detail=raw.detail,
+                anchor=anchor,
+                sources=raw.sources,
+                references=tuple(references.values()),
+                unresolved_references=tuple(unresolved),
+            )
+        )
+    return tuple(built)
+
+
+def _anchor_range(sheet_name: str, a1: str, max_row: int) -> A1Range:
+    """An object's anchor; a whole-column one (a validation on ``C:C``) is clipped to the used
+    height, and anything unparseable falls back to ``A1`` rather than dropping the object."""
+    text = a1.replace("$", "")
+    first, _, last = text.partition(":")
+    if first.isalpha() and last.isalpha():
+        text = f"{first}1:{last}{max(max_row, 1)}"
+    try:
+        return A1Range.parse(sheet_name, text)
+    except ValueError:
+        return A1Range.parse(sheet_name, "A1")
+
+
 def build_model(
     raw: RawWorkbook,
     *,
@@ -324,6 +382,7 @@ def build_model(
             sheet, workbook_id=workbook_id, version=version, config=settings
         )
         formulas = () if sheet.is_macro_sheet else _build_formulas(sheet, context)
+        objects = () if sheet.is_macro_sheet else _build_objects(sheet, context)
         sheets.append(
             SheetModel(
                 name=sheet.name,
@@ -337,6 +396,7 @@ def build_model(
                 declared_dimension_flagged=sheet.declared_dimension_flagged,
                 is_macro_sheet=sheet.is_macro_sheet,
                 table_names=tuple(table.name for table in sheet.tables),
+                objects=objects,
             )
         )
     return WorkbookModel(

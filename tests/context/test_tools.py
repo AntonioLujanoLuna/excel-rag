@@ -90,7 +90,9 @@ class TestPrecedentsAndDependents:
         assert "Forecast!B2" in session.dependents("Assumptions", "C7")
 
     def test_an_unread_cell_has_no_dependents(self, session: WorkbookSession) -> None:
-        assert session.dependents("Assumptions", "C8") == "No formula reads Assumptions!C8."
+        assert session.dependents("Assumptions", "C8") == (
+            "No formula, chart, pivot table or validation reads Assumptions!C8."
+        )
 
     def test_unresolvable_references_are_named(self, fixtures) -> None:
         text = WorkbookSession.load(fixtures.indirect_offset()).precedents("Calc", "A3:A4")

@@ -186,6 +186,26 @@ and German, which is where a semantic retriever earns its cost. A run that canno
 missing `embed` extra) is skipped with a note rather than failing. Ranking on the double is not a
 cluster's: its `knn` is exact and its lexical score is a match count, not BM25.
 
+**Mined cases.** `--mine` asks questions the workbooks answer by their own labels
+(`evaluate/mining.py`): a labelled formula or a column of identical formulas becomes
+"How is EBITDA calculated?" (row label and header together when both exist: "How is Q1 Revenue
+calculated?"), and a labelled input some formula reads becomes "What is the Tax rate?", answered by
+the label and the value together. They reuse the workbook's words, so they are a regression set for
+chunking and ranking, not a measure of semantic recall; `--save-cases` writes them out for review or
+hand-editing.
+
+```bash
+excel-rag evaluate --mine --workbook wb42=path/to/book.xlsx --save-cases wb42.jsonl
+```
+
+**A gate.** `--min [CONFIG:]METRIC=VALUE` (repeatable; `mrr`, `hit@K`, `recall@K`) exits 3 when a run
+falls below the floor, and when the configuration it names did not run (a floor that silently stops
+applying gates nothing). CI runs the sample and the mined sample with the deterministic doubles and
+fixed floors (`.github/workflows/ci.yml`, "Retrieval quality"), so a change that loses an answer
+fails the build. On the mined sample the lexical run finds every answer in the top 3 but ranks the
+`Actuals` revenue column above the forecast formula for "How is Q1 Revenue calculated?" -- on the
+double's match-count scoring; whether BM25 on a cluster does the same is not measured here.
+
 ## Reference expansion and truncation
 
 `retrieval/expansion.py`. Breadth-first over the `references` edges of `excel_structure`:
@@ -255,9 +275,11 @@ Reading it honestly:
   Elasticsearch 8.15 (the `live-elasticsearch` CI job; locally, set `EXCEL_RAG_TEST_ES_URL`). Its
   first run found what the in-memory double could not: `delete_by_query` without a refresh left a
   replaced version visible to search and count. No latency number here comes from a cluster.
-- **Recall is not measured.** `tests/live/test_mdenseon.py` checks that specific cross-lingual and
-  paraphrased questions land in the top 3, which is a regression guard, not a recall figure. No
-  labelled question set exists yet, so no precision/recall number is claimed for the fusion.
+- **Recall on real workbooks is not measured.** `tests/live/test_mdenseon.py` checks that specific
+  cross-lingual and paraphrased questions land in the top 3, which is a regression guard, not a
+  recall figure, and the CI floors above run on the in-memory double with stand-in models. No
+  labelled question set over real workbooks exists yet, so no recall number is claimed for the
+  fusion on a cluster with the real model.
 - One data point, not a benchmark: on a CPU-only sandbox, a hybrid query against a single-node
   Elasticsearch 8.15 took ~100 ms including the query embedding, and embedding + indexing six small
   workbooks (60 chunks) took ~17 s with the model already downloaded.

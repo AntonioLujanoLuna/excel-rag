@@ -26,6 +26,10 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
 ]
+# The MCP server (`excel-rag mcp`): mcp 2.x, where FastMCP became MCPServer.
+mcp = [
+    "mcp>=2,<3",
+]
 
 [project.scripts]
 excel-rag = "excel_rag.cli:main"

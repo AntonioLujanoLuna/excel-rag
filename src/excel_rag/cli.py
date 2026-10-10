@@ -107,6 +107,16 @@ def _diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def _mcp(args: argparse.Namespace) -> int:
+    try:
+        from .mcp_server import run
+    except ModuleNotFoundError as error:  # pragma: no cover - only without the extra
+        print(f"excel-rag: the MCP server needs the 'mcp' extra ({error})", file=sys.stderr)
+        return 1
+    run(args.root or ["."], search=args.search)
+    return 0
+
+
 def _serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -159,6 +169,20 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
 
+    mcp_parser = subparsers.add_parser(
+        "mcp", help="serve the workbook tools to an MCP client over stdio (needs the mcp extra)"
+    )
+    mcp_parser.add_argument(
+        "--root",
+        action="append",
+        help="a directory the tools may read workbooks from, repeatable (default: .)",
+    )
+    mcp_parser.add_argument(
+        "--search",
+        action="store_true",
+        help="also serve search_index over the configured Elasticsearch",
+    )
+
     serve_parser = subparsers.add_parser("serve", help="run the retrieval API")
     serve_parser.add_argument("--host")
     serve_parser.add_argument("--port", type=int)
@@ -182,6 +206,8 @@ def main(argv: list[str] | None = None) -> int:
             return _render(args)
         if args.command == "diff":
             return _diff(args)
+        if args.command == "mcp":
+            return _mcp(args)
         if args.command == "serve":
             return _serve(args)
     except IngestError as error:

@@ -241,7 +241,7 @@ class WorkbookSession:
                 total += 1
                 if len(matches) < MAX_MATCHES:
                     matches.append(
-                        f"- named range {named.name} = {_qualified(named.sheet_name, named.a1)}"
+                        f"- named range {named.label} = {_qualified(named.sheet_name, named.a1)}"
                     )
         if not matches:
             return f"No cell contains {query!r}."

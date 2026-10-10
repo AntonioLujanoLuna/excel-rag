@@ -200,8 +200,8 @@ def _header(out: _Writer, model: WorkbookModel) -> None:
 
 def _named(named: Any) -> str:
     if named.resolved and named.sheet_name and named.a1:
-        return f"{named.name} = {_qualified(named.sheet_name, named.a1)}"
-    return f"{named.name} (not a static range: {named.detail or 'unresolved'})"
+        return f"{named.label} = {_qualified(named.sheet_name, named.a1)}"
+    return f"{named.label} (not a static range: {named.detail or 'unresolved'})"
 
 
 def _sheet(out: _Writer, sheet: SheetModel, detail: Detail) -> None:
@@ -371,6 +371,8 @@ def formula_line(
         result = (
             _value(entry.cached_value, None) if entry.cached_value is not None else "no saved value"
         )
+        if entry.array_range is not None and entry.array_range != entry.a1_range.a1:
+            result += f" (array over {entry.array_range})"
     line = f"{where}: {text} → {result}"
     reads = ", ".join(
         dict.fromkeys(
@@ -396,9 +398,9 @@ def _display(cell: CellValue | None, detail: Detail) -> str:
     """A cell as it should read in a grid: the saved value for a formula, marked ``ƒ``."""
     if cell is None:
         return ""
-    if cell.formula:
+    if cell.computed:
         if cell.cached_value is None:
-            return _cell_text(cell.formula, detail.cell_chars)
+            return _cell_text(cell.formula or "", detail.cell_chars)
         return f"{_value(cell.cached_value, cell, detail.cell_chars)} {FORMULA_MARK}"
     return _value(cell.value, cell, detail.cell_chars)
 

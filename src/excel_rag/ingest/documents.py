@@ -257,6 +257,8 @@ def _formula_text(entry: FormulaEntry) -> str:
     ]
     if entry.is_cluster:
         parts.append(f"This pattern repeats across {len(entry.member_coordinates)} cells.")
+    if entry.array_range is not None and entry.array_range != entry.a1_range.a1:
+        parts.append(f"Array formula; its result last covered {entry.array_range}.")
     if references:
         parts.append(f"Reads: {references}.")
     if entry.unresolved_references:
@@ -302,7 +304,7 @@ def build_documents(
             f"with {len(model.sheets)} worksheet(s): {', '.join(sheet_names)}. "
             f"{region_total} region(s)/table(s) detected. "
             + (
-                f"Named ranges: {', '.join(name.name for name in model.named_ranges)}. "
+                f"Named ranges: {', '.join(name.label for name in model.named_ranges)}. "
                 if model.named_ranges
                 else ""
             )
@@ -545,7 +547,7 @@ def _build_important_cells(builder: _Builder, model: WorkbookModel, sheet: Sheet
                 parent_id=_region_parent(sheet, bounds),
                 cached_value=_json_value(cell.cached_value) if cell else None,
                 display_value=(
-                    format_value(cell.value if cell.formula is None else cell.cached_value)
+                    format_value(cell.cached_value if cell.computed else cell.value)
                     if cell
                     else None
                 ),

@@ -110,6 +110,25 @@ Elasticsearch. See [docs/context.md](docs/context.md), `excel-rag render`, and
 `examples/ask_workbook.py`. `excel-rag diff before.xlsx after.xlsx` says what changed between two
 versions — inputs, formulas, saved results — and which formulas read each changed input.
 
+## Using it from Claude or another MCP client
+
+`excel-rag mcp` serves the workbook tools over stdio to any MCP client: `list_workbooks`,
+`render_workbook`, `read_range`, `find`, `precedents`, `dependents` and `diff_workbooks`, on the
+`.xlsx`/`.xlsm` files under the directories given with `--root` (default: the working directory).
+Every tool is read-only, and a path outside the roots is refused. With `--search` it also serves
+`search_index`, the retrieval endpoint's search over the configured Elasticsearch.
+
+```bash
+uv sync --extra mcp
+claude mcp add excel-rag -- uv run --directory "$PWD" excel-rag mcp --root ~/Spreadsheets
+```
+
+For Claude Desktop, the same command goes in `claude_desktop_config.json`:
+
+```json
+{"mcpServers": {"excel-rag": {"command": "excel-rag", "args": ["mcp", "--root", "/path/to/books"]}}}
+```
+
 ## Invariants
 
 - **No cross-version reads.** Ids are deterministic within `(workbook_id, version)`; a replacement

@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra mcp
       - name: Format
         run: uv run ruff format --check .
       - name: Lint

@@ -132,18 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     index_parser = subparsers.add_parser("index", help="ingest one or more workbooks")
-    index_parser.add_argument("paths", nargs="+", help="paths to .xlsx/.xlsm files")
+    index_parser.add_argument("paths", nargs="+", help="paths to .xlsx/.xlsm/.xlsb/.csv files")
     index_parser.add_argument("--workbook-id", required=True)
     index_parser.add_argument("--version", type=int, required=True)
     index_parser.add_argument("--acl", action="append", default=[], help="repeatable ACL scope")
 
     inspect_parser = subparsers.add_parser("inspect", help="print detected regions and counts")
-    inspect_parser.add_argument("path", help="path to an .xlsx/.xlsm file")
+    inspect_parser.add_argument("path", help="path to an .xlsx/.xlsm/.xlsb/.csv file")
 
     render_parser = subparsers.add_parser(
         "render", help="print a workbook as text for a conversation's context window"
     )
-    render_parser.add_argument("path", help="path to an .xlsx/.xlsm file")
+    render_parser.add_argument("path", help="path to an .xlsx/.xlsm/.xlsb/.csv file")
     render_parser.add_argument(
         "--budget", type=int, default=8_000, help="token budget (estimated at 3 chars/token)"
     )

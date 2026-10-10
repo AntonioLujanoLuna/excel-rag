@@ -143,11 +143,14 @@ class CellValue:
     array_master: str | None = None
     #: For an array formula's master cell: the extent its result covers (``B2:B40``).
     array_range: str | None = None
+    #: A formula cell whose text the format does not expose (``.xlsb``): only its last-saved value
+    #: (``cached_value``) is known, and it has no precedents.
+    formula_unavailable: bool = False
 
     @property
     def computed(self) -> bool:
         """Whether the cell's content is a formula result rather than input data."""
-        return self.formula is not None or self.array_master is not None
+        return self.formula is not None or self.array_master is not None or self.formula_unavailable
 
 
 @dataclass(frozen=True, slots=True)

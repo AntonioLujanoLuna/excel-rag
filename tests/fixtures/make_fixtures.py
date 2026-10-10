@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import struct
 import zipfile
 from pathlib import Path
 
@@ -351,3 +352,122 @@ def array_formula(directory: Path) -> Path:
     return _rewrite_zip(
         base, directory / "array_formula.xlsx", edits={"xl/worksheets/sheet1.xml": edit}
     )
+
+
+# -------------------------------------------------------------------------------------------------
+# Binary .xlsb, written record by record (no Python library writes BIFF12).
+# -------------------------------------------------------------------------------------------------
+def _record(record_id: int, payload: bytes = b"") -> bytes:
+    ident = bytes([record_id]) if record_id < 0x80 else bytes([record_id & 0xFF, record_id >> 8])
+    length = len(payload)
+    encoded = bytearray()
+    while True:
+        byte = length & 0x7F
+        length >>= 7
+        encoded.append(byte | (0x80 if length else 0))
+        if not length:
+            break
+    return ident + bytes(encoded) + payload
+
+
+def _wide(text: str) -> bytes:
+    return struct.pack("<I", len(text)) + text.encode("utf-16-le")
+
+
+def _cell(column: int, value: bytes) -> bytes:
+    return struct.pack("<II", column, 0) + value
+
+
+def xlsb_workbook(directory: Path) -> Path:
+    """Two sheets: typed inputs, formula results of each kind, a hostile declared dimension, and
+    a defined name the reader cannot see."""
+    strings = ["Region", "Revenue", "North", "South", "Share"]
+    shared = (
+        _record(0x019F, struct.pack("<II", len(strings), len(strings)))
+        + b"".join(_record(0x0013, b"\x00" + _wide(text)) for text in strings)
+        + _record(0x01A0)
+    )
+    rows = [
+        # row 1: headers (shared strings)
+        (
+            0,
+            [
+                _record(0x07, _cell(0, struct.pack("<I", 0))),
+                _record(0x07, _cell(1, struct.pack("<I", 1))),
+                _record(0x07, _cell(2, struct.pack("<I", 4))),
+            ],
+        ),
+        # row 2: North, 100 (RK integer), a formula float result
+        (
+            1,
+            [
+                _record(0x07, _cell(0, struct.pack("<I", 2))),
+                _record(0x02, _cell(1, struct.pack("<i", (100 << 2) | 0x02))),
+                _record(0x09, _cell(2, struct.pack("<d", 0.4) + b"\x00" * 8)),
+            ],
+        ),
+        # row 3: South, 150.5 (double), a formula error result
+        (
+            2,
+            [
+                _record(0x07, _cell(0, struct.pack("<I", 3))),
+                _record(0x05, _cell(1, struct.pack("<d", 150.5))),
+                _record(0x0B, _cell(2, b"\x07")),
+            ],
+        ),
+        # row 5: a boolean input and a formula string result
+        (4, [_record(0x04, _cell(0, b"\x01")), _record(0x08, _cell(1, _wide("ok")))]),
+    ]
+    sheet = (
+        _record(0x0181)
+        + _record(0x0194, struct.pack("<IIII", 0, 1_048_575, 0, 16_383))
+        + _record(0x0191)
+        + b"".join(
+            _record(0x0000, struct.pack("<I", row) + b"\x00" * 13) + b"".join(cells)
+            for row, cells in rows
+        )
+        + _record(0x0192)
+        + _record(0x0182)
+    )
+    empty_sheet = _record(0x0181) + _record(0x0191) + _record(0x0192) + _record(0x0182)
+
+    def sheet_record(sheet_id: int, rel: str, name: str) -> bytes:
+        return _record(0x019C, struct.pack("<II", 0, sheet_id) + _wide(rel) + _wide(name))
+
+    workbook = (
+        _record(0x0183)
+        + _record(0x018F)
+        + sheet_record(1, "rId1", "Sales")
+        + sheet_record(2, "rId2", "Empty")
+        + _record(0x0190)
+        + _record(0x0027, b"\x00" * 16)
+        + _record(0x0184)
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>'
+        '<Relationship Id="rId2" Type="worksheet" Target="worksheets/sheet2.bin"/>'
+        "</Relationships>"
+    )
+    path = directory / "sales.xlsb"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("xl/workbook.bin", workbook)
+        archive.writestr("xl/_rels/workbook.bin.rels", rels)
+        archive.writestr("xl/sharedStrings.bin", shared)
+        archive.writestr("xl/worksheets/sheet1.bin", sheet)
+        archive.writestr("xl/worksheets/sheet2.bin", empty_sheet)
+    return path
+
+
+def csv_file(directory: Path) -> Path:
+    """Semicolon-delimited, with a BOM, a leading-zero id, a formula-looking text, a boolean."""
+    path = directory / "ventas región.csv"
+    path.write_bytes(
+        "﻿id;Región;Importe;Activo;Nota\n"
+        "007;Norte;1200,5;TRUE;=SUM(A1:A3)\n"
+        "8;Sur;980;false;\n"
+        "9;Este;1.5e3;TRUE;3/4\n".encode()
+    )
+    return path

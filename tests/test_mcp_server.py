@@ -99,7 +99,7 @@ def test_a_bad_call_is_a_tool_error_the_model_can_read(root: Path) -> None:
     text, error = _call(server, "render_workbook", {"path": "missing.xlsx"})
     assert error and "no such workbook" in text
     text, error = _call(server, "render_workbook", {"path": "notes.txt"})
-    assert error and "not an .xlsx" in text
+    assert error and "not an .xlsx/.xlsm/.xlsb/.csv workbook" in text
 
 
 def test_paths_outside_the_roots_are_refused(root: Path, tmp_path: Path) -> None:

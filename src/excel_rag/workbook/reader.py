@@ -1,5 +1,8 @@
 """Read an ``.xlsx`` / ``.xlsm`` into raw sheets -- no macros, no link refresh, no evaluation.
 
+A CSV file and a binary ``.xlsb`` are read too, into the same raw sheets, by
+:mod:`.formats`; what those formats cannot carry is stated in the workbook's warnings.
+
 The rules that govern this module:
 
 * ``data_only=False`` gives the formula text; the last value Excel saved for each formula cell comes
@@ -45,6 +48,7 @@ from openpyxl.worksheet.formula import (  # type: ignore[import-untyped]
 
 from .canonical import CellValue
 from .errors import WorkbookError
+from .formats import looks_like_xlsb, read_csv_cells, read_xlsb_sheets, sheet_name_for
 from .sheetscan import SheetScan, cached_value, scan_sheet
 
 _XLNS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -55,6 +59,8 @@ _MACRO_REL_SUFFIX = "/xlMacrosheet"
 
 #: A declared dimension larger than this many cells is reported as ignored, not honoured.
 MAX_DECLARED_CELLS = 5_000_000
+#: File suffixes read as CSV (when the bytes are not a zip package).
+CSV_SUFFIXES = (".csv", ".tsv", ".txt")
 #: Refuse a package whose declared uncompressed size is absurd, before openpyxl reads it.
 MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 
@@ -247,7 +253,8 @@ def _parse_xml(data: bytes, part: str) -> Element:
         raise WorkbookError(f"not a valid workbook package: {part} is not XML ({exc})") from exc
 
 
-def _read_package(data: bytes) -> _PackageFacts:
+def _open_archive(data: bytes) -> zipfile.ZipFile:
+    """The package as a zip, refused when it is not one or declares an absurd unpacked size."""
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile as exc:
@@ -255,13 +262,18 @@ def _read_package(data: bytes) -> _PackageFacts:
             "not a valid .xlsx/.xlsm package (not a zip archive; the file may be corrupt, "
             "truncated, or password-protected)"
         ) from exc
-    names = archive.namelist()
     uncompressed = sum(item.file_size for item in archive.infolist())
     if uncompressed > MAX_UNCOMPRESSED_BYTES:
         raise WorkbookError(
             f"refusing workbook: declared uncompressed size {uncompressed} bytes exceeds "
             f"the {MAX_UNCOMPRESSED_BYTES}-byte ceiling"
         )
+    return archive
+
+
+def _read_package(data: bytes) -> _PackageFacts:
+    archive = _open_archive(data)
+    names = archive.namelist()
     if "xl/workbook.xml" not in names:
         raise WorkbookError("not an Excel workbook package: xl/workbook.xml is missing")
 
@@ -340,6 +352,47 @@ def _load(data: bytes, *, data_only: bool) -> Any:
         raise WorkbookError(f"could not read the workbook: {exc}") from exc
 
 
+def _read_csv(data: bytes, *, label: str, location: str, digest: str) -> RawWorkbook:
+    if len(data) > MAX_UNCOMPRESSED_BYTES:
+        raise WorkbookError(
+            f"refusing CSV: {len(data)} bytes exceeds the {MAX_UNCOMPRESSED_BYTES}-byte ceiling"
+        )
+    sheet_name = sheet_name_for(label)
+    sheet = RawSheet(
+        name=sheet_name,
+        visibility="visible",
+        cells=read_csv_cells(data, sheet_name),
+        merged_ranges=(),
+        tables=(),
+    )
+    return RawWorkbook(
+        path=location,
+        source_file=label,
+        source_sha256=digest,
+        sheets=(sheet,),
+        defined_names=(),
+        warnings=("CSV: one sheet of values; numbers and TRUE/FALSE are typed, the rest is text",),
+    )
+
+
+def _read_xlsb(data: bytes, *, label: str, location: str, digest: str) -> RawWorkbook:
+    archive = _open_archive(data)
+    sheets, warnings = read_xlsb_sheets(archive)
+    has_vba = any(name.endswith("vbaProject.bin") for name in archive.namelist())
+    return RawWorkbook(
+        path=location,
+        source_file=label,
+        source_sha256=digest,
+        sheets=tuple(
+            RawSheet(name=name, visibility="visible", cells=cells, merged_ranges=(), tables=())
+            for name, cells in sheets
+        ),
+        defined_names=(),
+        has_vba=has_vba,
+        warnings=tuple(warnings),
+    )
+
+
 def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWorkbook:
     """Read a workbook into :class:`RawWorkbook`, or raise :class:`WorkbookError`.
 
@@ -359,6 +412,10 @@ def read_workbook(path: str | Path | bytes, *, name: str | None = None) -> RawWo
         label = name or source.name
         location = str(source)
     digest = hashlib.sha256(data).hexdigest()
+    if not data.startswith(b"PK") and Path(label).suffix.lower() in CSV_SUFFIXES:
+        return _read_csv(data, label=label, location=location, digest=digest)
+    if looks_like_xlsb(data):
+        return _read_xlsb(data, label=label, location=location, digest=digest)
     facts = _read_package(data)
 
     formula_wb = _load(data, data_only=False)

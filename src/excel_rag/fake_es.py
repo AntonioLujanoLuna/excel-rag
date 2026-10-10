@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -353,9 +354,17 @@ def _text_matches(value: Any, condition: Any) -> bool:
     if value is None:
         return False
     haystack = " ".join(str(part) for part in value) if isinstance(value, list) else str(value)
-    needle = {token for token in condition.lower().split() if token}
-    tokens = {token.strip(".,;:()?!\"'") for token in haystack.lower().split()}
-    return bool(needle & tokens)
+    return bool(_analyze(condition) & _analyze(haystack))
+
+
+#: Word characters, as the ``standard`` analyzer of a ``text`` field splits them: ``Region=North;``
+#: is two tokens and ``engineering?`` is ``engineering``. Splitting on whitespace instead made the
+#: double miss what a cluster finds.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _analyze(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.lower()))
 
 
 def _range_matches(value: Any, condition: Any) -> bool:

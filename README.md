@@ -155,6 +155,10 @@ of the fused list: `EXCEL_RAG_RERANK__PROVIDER=cross-encoder` (default model
 `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, `__WINDOW` 50 candidates). On a CPU-only host, install torch from
 `https://download.pytorch.org/whl/cpu` first to skip the CUDA wheels.
 
+To measure retrieval quality — hit@k, recall@k and MRR for lexical, hybrid and reranked search over
+question → expected-range pairs — run `excel-rag evaluate` (a built-in sample) or pass your own
+`--cases` and `--workbook ID=PATH`; see [docs/retrieval.md](docs/retrieval.md#measuring-retrieval-quality).
+
 To run the live tests, including the real model end to end:
 
 ```bash

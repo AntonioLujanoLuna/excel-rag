@@ -154,7 +154,37 @@ A reranked hit's `score_kind` is `rerank`. `provider=overlap` is a token-overlap
 semantics, for the same reason the hashing embedder exists.
 
 Reranking costs one model pass per windowed candidate per query, so `window` is the latency knob; a
-small window reorders only what fusion already ranked near the top.
+small window reorders only what fusion already ranked near the top. Whether it helps a given
+corpus is a question for `excel-rag evaluate`, not for intuition.
+
+## Measuring retrieval quality
+
+`excel_rag.evaluate` (`excel-rag evaluate`, or `python -m excel_rag.evaluate`). A case is a question,
+the workbook it is about, and the rectangles a correct answer cites, one JSON object per line:
+
+```json
+{"id": "growth", "question": "What growth rate is assumed?", "workbook_id": "wb42",
+ "expected": [{"sheet": "Assumptions", "a1": "A3:B7"}]}
+```
+
+Each workbook is ingested by the real parser and indexed into the in-memory double; each case is one
+`RetrievalService.search`. A hit is relevant when it is from the case's workbook, on an expected sheet,
+and its A1 range intersects an expected rectangle; workbook and sheet summaries never count, because
+a summary intersects everything and cites nothing. The report gives, per configuration (lexical;
+hybrid with the configured embedder; plus the configured reranker), **hit@k** (cases with a relevant
+hit in the top *k*), **recall@k** (expected rectangles covered in the top *k*, averaged) and **MRR**,
+then each case a configuration missed with what it returned instead.
+
+```bash
+excel-rag evaluate                                   # built-in planning workbook, 16 questions
+excel-rag evaluate --embedder hashing --rerank overlap   # the doubles: no weights, no semantics
+excel-rag evaluate --cases mine.jsonl --workbook wb42=path/to/book.xlsx --json
+```
+
+The built-in sample has questions that share no word with the cells and questions in Spanish, French
+and German, which is where a semantic retriever earns its cost. A run that cannot load a model (a
+missing `embed` extra) is skipped with a note rather than failing. Ranking on the double is not a
+cluster's: its `knn` is exact and its lexical score is a match count, not BM25.
 
 ## Reference expansion and truncation
 

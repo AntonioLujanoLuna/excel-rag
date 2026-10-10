@@ -130,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="tell the model omitted ranges can be read with the workbook tools",
     )
 
+    subparsers.add_parser(
+        "evaluate",
+        help="measure retrieval quality (hit@k, recall@k, MRR); see `excel-rag evaluate --help`",
+        add_help=False,
+    )
+
     serve_parser = subparsers.add_parser("serve", help="run the retrieval API")
     serve_parser.add_argument("--host")
     serve_parser.add_argument("--port", type=int)
@@ -137,7 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["evaluate"]:
+        from .evaluate.__main__ import main as evaluate_main
+
+        return evaluate_main(arguments[1:])
+    args = build_parser().parse_args(arguments)
     try:
         if args.command == "index":
             return _index(args)

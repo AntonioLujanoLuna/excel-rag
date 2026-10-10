@@ -121,6 +121,35 @@ def test_table_column_reference() -> None:
     reference = parsed.references[0].reference
     assert reference.kind is ReferenceKind.TABLE_COLUMN
     assert reference.sheet_name == "Actuals"
+    # The Revenue column only, not the whole table: a formula summing Revenue does not read Region.
+    assert reference.a1_range == "B1:B9"
+    assert reference.column_span == {"gte": 2, "lte": 2}
+    assert reference.row_span == {"gte": 1, "lte": 9}
+
+
+def test_structured_reference_forms_resolve_to_their_columns() -> None:
+    context = _context(
+        tables={
+            "Sales": TableInfo(
+                "Sales",
+                "Actuals",
+                A1Range.parse("Actuals", "C3:F20"),
+                ("Region", "Units", "Unit Price", "Amount"),
+            )
+        }
+    )
+
+    def ranges(formula: str) -> list[tuple[str, ReferenceKind]]:
+        parsed = parse_formula(formula, context)
+        assert parsed.unresolved == ()
+        return [(edge.reference.a1_range, edge.reference.kind) for edge in parsed.references]
+
+    column = [("F3:F20", ReferenceKind.TABLE_COLUMN)]
+    assert ranges("=Sales[[#This Row],[Amount]]") == column
+    assert ranges("=Sales[@Amount]*2") == column
+    assert ranges("=Sales[@[Unit Price]]") == [("E3:E20", ReferenceKind.TABLE_COLUMN)]
+    assert ranges("=SUM(Sales[[Units]:[Unit Price]])") == [("D3:E20", ReferenceKind.RANGE)]
+    assert ranges("=ROWS(Sales[#All])") == [("C3:F20", ReferenceKind.RANGE)]
 
 
 def test_whole_column_reference_expands_to_the_used_height() -> None:

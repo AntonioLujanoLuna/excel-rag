@@ -6,7 +6,8 @@ dependency graph. Both the semantics and that structure are indexed in Elasticse
 endpoint answers a semantic query with **exact coordinates, values and statically resolved
 references**.
 
-Design: `ideas/excel_rag_structure_aware_elasticsearch_search.md` (the proposal this implements).
+Design notes: [docs/ingestion.md](docs/ingestion.md), [docs/retrieval.md](docs/retrieval.md) and
+[docs/context.md](docs/context.md).
 
 ## The constraint, and what follows from it
 

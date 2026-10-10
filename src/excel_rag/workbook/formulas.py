@@ -232,16 +232,17 @@ def _function_gaps(raw_name: str) -> list[UnresolvedReference]:
     return []
 
 
-def _last_bracket_token(spec: str) -> str:
-    inner = spec.strip()
-    # [[#All],[Amount]] -> Amount ; [#Totals] -> #Totals ; Amount -> Amount
-    tokens = re.findall(r"\[([^\[\]]+)\]|([^,\[\]]+)", inner)
-    flat = [str(a or b) for a, b in tokens]
-    flat = [token.strip() for token in flat if token and token.strip()]
-    for token in reversed(flat):
-        if token and not token.startswith("#"):
-            return token
-    return flat[-1] if flat else ""
+def _table_columns(spec: str) -> tuple[str, ...]:
+    """The columns a structured reference's specifier names; none means the whole table.
+
+    ``Amount``, ``[#Data],[Amount]``, ``@Amount`` and ``@[Unit Price]`` name one column;
+    ``[Units]:[Price]`` names the two ends of a span; ``#All`` and ``[#Totals]`` name none.
+    """
+    inner = spec.strip().removeprefix("@").strip()
+    items = re.findall(r"\[([^\[\]]*)\]", inner) if "[" in inner else [inner]
+    return tuple(
+        item.strip() for item in items if item.strip() and not item.strip().startswith("#")
+    )
 
 
 def _check_sheet(
@@ -351,8 +352,8 @@ def _resolve_table(collector: _Collector, text: str, table: str | None, spec: st
         info.a1_range.min_col,
         info.a1_range.max_col,
     )
-    column = _last_bracket_token(spec)
-    if not column or column.startswith("#"):
+    columns = _table_columns(spec)
+    if not columns:
         collector.edge(
             range_node_id(context.workbook_id, context.version, info.sheet_name, info.a1_range.a1),
             info.sheet_name,
@@ -362,21 +363,46 @@ def _resolve_table(collector: _Collector, text: str, table: str | None, spec: st
             bounds,
         )
         return
-    matched = next((name for name in info.columns if name.lower() == column.lower()), None)
-    if matched is None:
-        collector.gap(
-            text, UnresolvedReason.OUT_OF_RANGE, f"table {info.name!r} has no column {column!r}"
+    folded = [name.lower() for name in info.columns]
+    width = info.a1_range.max_col - info.a1_range.min_col + 1
+    positions: list[int] = []
+    for column in columns:
+        position = folded.index(column.lower()) if column.lower() in folded else None
+        if position is None or position >= width:
+            collector.gap(
+                text, UnresolvedReason.OUT_OF_RANGE, f"table {info.name!r} has no column {column!r}"
+            )
+            return
+        positions.append(position)
+    # The column's rectangle over the table's rows (header and totals included: a superset of
+    # what the specifier reads, never a different column).
+    min_col = info.a1_range.min_col + min(positions)
+    max_col = info.a1_range.min_col + max(positions)
+    min_row, max_row = info.a1_range.min_row, info.a1_range.max_row
+    a1 = f"{column_letter(min_col)}{min_row}:{column_letter(max_col)}{max_row}"
+    if min_col != max_col:
+        collector.edge(
+            range_node_id(context.workbook_id, context.version, info.sheet_name, a1),
+            info.sheet_name,
+            a1,
+            ReferenceKind.RANGE,
+            True,
+            (min_row, max_row, min_col, max_col),
         )
         return
     collector.edge(
         table_column_node_id(
-            context.workbook_id, context.version, info.sheet_name, info.name, matched
+            context.workbook_id,
+            context.version,
+            info.sheet_name,
+            info.name,
+            info.columns[positions[0]],
         ),
         info.sheet_name,
-        f"{column_letter(info.a1_range.min_col)}:{column_letter(info.a1_range.max_col)}",
+        a1,
         ReferenceKind.TABLE_COLUMN,
         True,
-        bounds,
+        (min_row, max_row, min_col, max_col),
     )
 
 
